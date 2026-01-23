@@ -184,7 +184,14 @@ struct JwkSet {
 #[derive(Debug, Deserialize, ToSchema)]
 struct AttestRequest {
     enclave_url: String,
+    #[serde(default)]
     nonce: Option<String>,
+    /// User identifier (from Clerk or other auth provider). Defaults to "anonymous".
+    #[serde(default)]
+    user_id: Option<String>,
+    /// User role for RBAC. Defaults to "user".
+    #[serde(default)]
+    role: Option<String>,
 }
 
 // Response payload for /attest.
@@ -200,11 +207,14 @@ struct AttestResponse {
 struct AttestationClaims {
     iss: String,
     sub: String,
+    aud: String,
     iat: u64,
     exp: u64,
+    role: String,
     enclave_url: String,
     enclave_public_key: Jwk,
     policy: PolicyClaims,
+    #[serde(skip_serializing_if = "Option::is_none")]
     nonce: Option<String>,
 }
 
@@ -505,9 +515,11 @@ async fn attest(
 
     let claims = AttestationClaims {
         iss: state.config.issuer.clone(),
-        sub: "enclave-attestation".to_string(),
+        sub: request.user_id.unwrap_or_else(|| "anonymous".to_string()),
+        aud: "relational-sdk".to_string(),
         iat,
         exp,
+        role: request.role.unwrap_or_else(|| "user".to_string()),
         enclave_url: request.enclave_url,
         enclave_public_key: enclave_public_key.clone(),
         policy: PolicyClaims {
