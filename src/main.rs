@@ -46,8 +46,12 @@ use dotenvy::dotenv;
 use jsonwebtoken::EncodingKey;
 use p256::pkcs8::DecodePrivateKey;
 use p256::SecretKey;
+use rustls::ServerConfig;
 use std::fs;
+use std::io::BufReader;
 use std::sync::Arc;
+use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 use tracing::{error, info};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -132,7 +136,7 @@ async fn run() -> Result<(), AppError> {
 
     // Shared state for HTTP handlers.
     let state = Arc::new(AppState {
-        config,
+        config: config.clone(),
         encoding_key,
         public_jwk,
         ratls,
@@ -146,14 +150,100 @@ async fn run() -> Result<(), AppError> {
         .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
         .with_state(state.clone());
 
-    // Bind and serve.
-    let listener = tokio::net::TcpListener::bind(state.config.bind_addr)
+    // Bind listener.
+    let listener = TcpListener::bind(config.bind_addr)
         .await
         .map_err(|err| AppError::Config(format!("failed to bind: {err}")))?;
-    info!(addr = %state.config.bind_addr, "AVS listening");
 
-    axum::serve(listener, app)
-        .await
-        .map_err(|err| AppError::Config(format!("server error: {err}")))?;
+    // Start server with optional TLS.
+    if config.tls_enabled() {
+        let tls_config = load_tls_config(&config)?;
+        let acceptor = TlsAcceptor::from(Arc::new(tls_config));
+        info!(addr = %config.bind_addr, "AVS listening (HTTPS)");
+        serve_tls(listener, app, acceptor).await?;
+    } else {
+        info!(addr = %config.bind_addr, "AVS listening (HTTP)");
+        axum::serve(listener, app)
+            .await
+            .map_err(|err| AppError::Config(format!("server error: {err}")))?;
+    }
+
     Ok(())
+}
+
+/// Load TLS configuration from certificate and key files.
+fn load_tls_config(config: &Config) -> Result<ServerConfig, AppError> {
+    let cert_path = config.tls_cert_path.as_ref().ok_or_else(|| {
+        AppError::Config("TLS cert path required when TLS is enabled".to_string())
+    })?;
+    let key_path = config.tls_key_path.as_ref().ok_or_else(|| {
+        AppError::Config("TLS key path required when TLS is enabled".to_string())
+    })?;
+
+    // Load certificate chain
+    let cert_file = fs::File::open(cert_path)?;
+    let mut cert_reader = BufReader::new(cert_file);
+    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| AppError::Config(format!("failed to read certs: {e}")))?;
+
+    // Load private key
+    let key_file = fs::File::open(key_path)?;
+    let mut key_reader = BufReader::new(key_file);
+    let key = rustls_pemfile::private_key(&mut key_reader)
+        .map_err(|e| AppError::Config(format!("failed to read key: {e}")))?
+        .ok_or_else(|| AppError::Config("no private key found in file".to_string()))?;
+
+    // Build TLS config
+    let tls_config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| AppError::Config(format!("TLS config error: {e}")))?;
+
+    Ok(tls_config)
+}
+
+/// Serve HTTPS requests using TLS acceptor.
+async fn serve_tls(
+    listener: TcpListener,
+    app: Router,
+    acceptor: TlsAcceptor,
+) -> Result<(), AppError> {
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use tower_service::Service;
+
+    loop {
+        let (stream, _addr) = listener
+            .accept()
+            .await
+            .map_err(|e| AppError::Config(format!("accept error: {e}")))?;
+
+        let acceptor = acceptor.clone();
+        let app = app.clone();
+
+        tokio::spawn(async move {
+            match acceptor.accept(stream).await {
+                Ok(tls_stream) => {
+                    let io = TokioIo::new(tls_stream);
+                    let hyper_svc = service_fn(move |req| {
+                        let mut svc = app.clone();
+                        async move {
+                            svc.call(req).await
+                        }
+                    });
+                    if let Err(e) = http1::Builder::new()
+                        .serve_connection(io, hyper_svc)
+                        .await
+                    {
+                        tracing::debug!("connection error: {e}");
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("TLS handshake error: {e}");
+                }
+            }
+        });
+    }
 }

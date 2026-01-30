@@ -1,0 +1,15 @@
+# Docker ignore for AVS build context
+target/
+.git/
+.github/
+.gitignore
+*.md
+!README.md
+.env
+.env.*
+*.pem
+*.key
+Cargo.lock
+
+# Secrets directory
+secrets/

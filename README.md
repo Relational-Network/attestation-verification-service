@@ -103,22 +103,144 @@ Note: At least one of `AVS_EXPECTED_MRSIGNER` or `AVS_EXPECTED_MRENCLAVE` must b
 | `AVS_ALLOW_OUTDATED_TCB` | `0` | Set to `1` to allow outdated TCB |
 | `AVS_ALLOW_HW_CONFIG_NEEDED` | `0` | Set to `1` to allow HW config needed |
 | `AVS_ALLOW_SW_HARDENING_NEEDED` | `0` | Set to `1` to allow SW hardening needed |
+| `AVS_TLS_CERT_PATH` | (none) | Path to TLS certificate (PEM) - enables HTTPS |
+| `AVS_TLS_KEY_PATH` | (none) | Path to TLS private key (PEM) - enables HTTPS |
 
-## Run
+## Development
+
+### Run locally (HTTP)
 
 ```bash
-export AVS_SIGNING_KEY_PATH=/path/to/avs-signing-key.pem
+# Generate signing key (first time only)
+cd secrets && ./generate-keys.sh
+
+# Run service (HTTP mode)
+export AVS_SIGNING_KEY_PATH=./secrets/avs-signing-key.pem
 export AVS_EXPECTED_MRSIGNER=<hex>
 export AVS_ALLOW_DEBUG_ENCLAVE=1  # for development only
-
 cargo run
 ```
 
-## Generate a signing key (dev)
+### Run locally (HTTPS)
+
+```bash
+# Generate TLS certificate (self-signed for development)
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout secrets/avs-tls.key -out secrets/avs-tls.crt -days 365 \
+  -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+
+# Run service (HTTPS mode)
+export AVS_SIGNING_KEY_PATH=./secrets/avs-signing-key.pem
+export AVS_TLS_CERT_PATH=./secrets/avs-tls.crt
+export AVS_TLS_KEY_PATH=./secrets/avs-tls.key
+export AVS_EXPECTED_MRSIGNER=<hex>
+export AVS_ALLOW_DEBUG_ENCLAVE=1
+cargo run
+
+# Test with curl (-k for self-signed cert)
+curl -sk https://127.0.0.1:9100/health
+```
+
+### Docker (HTTP)
+
+> **Note:** The Docker image is based on Ubuntu 20.04 (focal) because `az-dcap-client`
+> requires this specific version for Azure DCsv3 SGX VMs.
+
+```bash
+# Build
+docker build -t avs .
+
+# Run (HTTP mode, host network for localhost enclave access)
+docker run -d \
+  --name avs \
+  --network host \
+  -v ./secrets:/secrets:ro \
+  -e AVS_SIGNING_KEY_PATH=/secrets/avs-signing-key.pem \
+  -e AVS_EXPECTED_MRSIGNER=<hex> \
+  -e AVS_ALLOW_DEBUG_ENCLAVE=1 \
+  -e AVS_ALLOW_OUTDATED_TCB=1 \
+  avs
+```
+
+### Docker (HTTPS)
+
+```bash
+# Generate TLS certificate first (see above)
+
+# Run (HTTPS mode)
+docker run -d \
+  --name avs \
+  --network host \
+  -v ./secrets:/secrets:ro \
+  -e AVS_SIGNING_KEY_PATH=/secrets/avs-signing-key.pem \
+  -e AVS_TLS_CERT_PATH=/secrets/avs-tls.crt \
+  -e AVS_TLS_KEY_PATH=/secrets/avs-tls.key \
+  -e AVS_EXPECTED_MRSIGNER=<hex> \
+  -e AVS_ALLOW_DEBUG_ENCLAVE=1 \
+  -e AVS_ALLOW_OUTDATED_TCB=1 \
+  avs
+
+# Test
+curl -sk https://127.0.0.1:9100/health
+```
+
+### Quick E2E Test (HTTPS)
+
+```bash
+# 1. Generate keys (if not exists)
+mkdir -p secrets
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+  -out secrets/avs-signing-key.pem
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout secrets/avs-tls.key -out secrets/avs-tls.crt -days 365 \
+  -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+
+# 2. Start AVS container (HTTPS)
+docker run --rm -d --name avs --network host \
+  -v $(pwd)/secrets:/secrets:ro \
+  -e AVS_SIGNING_KEY_PATH=/secrets/avs-signing-key.pem \
+  -e AVS_TLS_CERT_PATH=/secrets/avs-tls.crt \
+  -e AVS_TLS_KEY_PATH=/secrets/avs-tls.key \
+  -e AVS_EXPECTED_MRSIGNER=777d23b75d3974a2a67224e49e78a45f65537861605cc0b86cb92e8d79a8d243 \
+  -e AVS_ALLOW_DEBUG_ENCLAVE=1 \
+  -e AVS_ALLOW_OUTDATED_TCB=1 \
+  avs
+
+# 3. Test health
+curl http://127.0.0.1:9100/health
+
+# 4. Test attestation (requires enclave running on port 8080)
+curl -s -X POST http://127.0.0.1:9100/v1/attest \
+  -H 'Content-Type: application/json' \
+  -d '{"enclave_url":"https://127.0.0.1:8080"}' | jq
+```
+
+### Generate a signing key
 
 ```bash
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out avs-signing-key.pem
 ```
+
+## CI/CD
+
+This repo uses GitHub Actions:
+
+- **CI** (`.github/workflows/ci.yml`): Runs on push/PR to main/staging
+  - Lint (rustfmt, clippy)
+  - Test
+  - Build Docker image
+  - Security audit
+
+- **CD** (`.github/workflows/cd-staging.yml`): Runs on push to staging
+  - Build and push Docker image to GHCR
+  - Deploy to staging environment
+
+### Required Secrets
+
+| Secret | Description |
+|--------|-------------|
+| `GITHUB_TOKEN` | Automatic, for GHCR |
+| `STAGING_SSH_HOST` | (optional) SSH host for deployment |
 
 ## API
 
@@ -190,7 +312,7 @@ The codebase is organized into logical modules:
 1. Build and run the enclave server with RA-TLS enabled:
 
    ```bash
-   cd /home/binglekruger/development/iob-micres/relational-sdk
+   cd .../relational-sdk
    make SGX=1 RA_TYPE=dcap
    gramine-sgx relational-sdk
    ```
@@ -204,7 +326,7 @@ The codebase is organized into logical modules:
 3. Run the AVS with expected measurements:
 
    ```bash
-   cd /home/binglekruger/development/iob-micres/attestation-verification-service
+   cd .../attestation-verification-service
    export AVS_SIGNING_KEY_PATH=/path/to/avs-signing-key.pem
    export AVS_EXPECTED_MRSIGNER=<hex>
    export AVS_EXPECTED_ISV_PROD_ID=<decimal>

@@ -24,6 +24,8 @@ pub struct Config {
     pub issuer: String,
     pub token_ttl_secs: u64,
     pub signing_key_path: PathBuf,
+    pub tls_cert_path: Option<PathBuf>,
+    pub tls_key_path: Option<PathBuf>,
     pub ratls_verify_lib: PathBuf,
     pub expected_mrsigner: String,
     pub expected_mrenclave: String,
@@ -37,6 +39,11 @@ pub struct Config {
 }
 
 impl Config {
+    /// Check if TLS is enabled (both cert and key paths are set).
+    pub fn tls_enabled(&self) -> bool {
+        self.tls_cert_path.is_some() && self.tls_key_path.is_some()
+    }
+
     /// Read environment configuration with safe defaults and required checks.
     ///
     /// # Required Environment Variables
@@ -49,9 +56,12 @@ impl Config {
     /// - `AVS_BIND_ADDR`: Listen address (default: `0.0.0.0:9100`)
     /// - `AVS_ISSUER`: JWT issuer claim (default: `attestation-verification-service`)
     /// - `AVS_TOKEN_TTL_SECS`: Token lifetime (default: `300`)
+    /// - `AVS_TLS_CERT_PATH`: Path to TLS certificate (PEM format) - enables HTTPS
+    /// - `AVS_TLS_KEY_PATH`: Path to TLS private key (PEM format) - enables HTTPS
     /// - `AVS_RATLS_VERIFY_LIB`: Path to RA-TLS verifier library
     /// - `AVS_EXPECTED_ISV_PROD_ID`: ISV Product ID policy
     /// - `AVS_EXPECTED_ISV_SVN`: ISV Security Version policy
+    /// - `AVS_ALLOWED_ENCLAVE_HOSTS`: Comma-separated allowlist
     /// - `AVS_ALLOW_DEBUG_ENCLAVE`: Allow debug enclaves (set to `1`)
     /// - `AVS_ALLOW_OUTDATED_TCB`: Allow outdated TCB (set to `1`)
     /// - `AVS_ALLOW_HW_CONFIG_NEEDED`: Allow hardware config needed (set to `1`)
@@ -72,6 +82,9 @@ impl Config {
         let signing_key_path = env::var("AVS_SIGNING_KEY_PATH")
             .map(PathBuf::from)
             .map_err(|_| "AVS_SIGNING_KEY_PATH is required".to_string())?;
+
+        let tls_cert_path = env::var("AVS_TLS_CERT_PATH").ok().map(PathBuf::from);
+        let tls_key_path = env::var("AVS_TLS_KEY_PATH").ok().map(PathBuf::from);
 
         let ratls_verify_lib = env::var("AVS_RATLS_VERIFY_LIB")
             .map(PathBuf::from)
@@ -122,6 +135,8 @@ impl Config {
             issuer,
             token_ttl_secs,
             signing_key_path,
+            tls_cert_path,
+            tls_key_path,
             ratls_verify_lib,
             expected_mrsigner,
             expected_mrenclave,
