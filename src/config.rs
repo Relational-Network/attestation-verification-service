@@ -100,9 +100,7 @@ impl Config {
             env::var("AVS_EXPECTED_ISV_SVN").unwrap_or_else(|_| "any".to_string());
 
         if expected_mrsigner == "any" && expected_mrenclave == "any" {
-            return Err(
-                "AVS_EXPECTED_MRSIGNER or AVS_EXPECTED_MRENCLAVE must be set".to_string(),
-            );
+            return Err("AVS_EXPECTED_MRSIGNER or AVS_EXPECTED_MRENCLAVE must be set".to_string());
         }
 
         let allow_debug_enclave = env::var("AVS_ALLOW_DEBUG_ENCLAVE")
@@ -167,7 +165,11 @@ impl Config {
         );
         env::set_var(
             "RA_TLS_ALLOW_HW_CONFIG_NEEDED",
-            if self.allow_hw_config_needed { "1" } else { "0" },
+            if self.allow_hw_config_needed {
+                "1"
+            } else {
+                "0"
+            },
         );
         env::set_var(
             "RA_TLS_ALLOW_SW_HARDENING_NEEDED",

@@ -58,7 +58,9 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use config::Config;
 use error::AppError;
-use handlers::{attest, health, jwks, AppState, AttestRequest, AttestResponse, AttestationClaims, PolicyClaims};
+use handlers::{
+    attest, health, jwks, AppState, AttestRequest, AttestResponse, AttestationClaims, PolicyClaims,
+};
 use jwk::{jwk_for_public_key, Jwk, JwkSet};
 use ratls::RaTlsVerifier;
 
@@ -176,9 +178,10 @@ fn load_tls_config(config: &Config) -> Result<ServerConfig, AppError> {
     let cert_path = config.tls_cert_path.as_ref().ok_or_else(|| {
         AppError::Config("TLS cert path required when TLS is enabled".to_string())
     })?;
-    let key_path = config.tls_key_path.as_ref().ok_or_else(|| {
-        AppError::Config("TLS key path required when TLS is enabled".to_string())
-    })?;
+    let key_path = config
+        .tls_key_path
+        .as_ref()
+        .ok_or_else(|| AppError::Config("TLS key path required when TLS is enabled".to_string()))?;
 
     // Load certificate chain
     let cert_file = fs::File::open(cert_path)?;
@@ -229,14 +232,9 @@ async fn serve_tls(
                     let io = TokioIo::new(tls_stream);
                     let hyper_svc = service_fn(move |req| {
                         let mut svc = app.clone();
-                        async move {
-                            svc.call(req).await
-                        }
+                        async move { svc.call(req).await }
                     });
-                    if let Err(e) = http1::Builder::new()
-                        .serve_connection(io, hyper_svc)
-                        .await
-                    {
+                    if let Err(e) = http1::Builder::new().serve_connection(io, hyper_svc).await {
                         tracing::debug!("connection error: {e}");
                     }
                 }

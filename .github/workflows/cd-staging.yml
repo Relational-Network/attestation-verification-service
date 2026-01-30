@@ -63,11 +63,17 @@ jobs:
     steps:
       - name: Deploy AVS via SSH
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         with:
           host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
+          envs: GHCR_TOKEN
           script: |
+            echo "=== Logging into GHCR ==="
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u relational-network --password-stdin
+            
             echo "=== Pulling latest AVS image ==="
             docker pull ghcr.io/relational-network/attestation-verification-service:staging-latest
             

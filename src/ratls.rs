@@ -50,9 +50,7 @@ impl RaTlsVerifier {
                 unsafe extern "C" fn(*mut u8, usize, *mut RaTlsVerifyCallbackResults) -> i32,
             > = lib
                 .get(b"ra_tls_verify_callback_extended_der")
-                .map_err(|err| {
-                    AppError::Config(format!("missing ra_tls_verify symbol: {err}"))
-                })?;
+                .map_err(|err| AppError::Config(format!("missing ra_tls_verify symbol: {err}")))?;
             *symbol
         };
         Ok(Self {

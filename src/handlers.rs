@@ -212,11 +212,7 @@ pub async fn attest(
         nonce: request.nonce,
     };
 
-    let token = encode(
-        &Header::new(Algorithm::ES256),
-        &claims,
-        &state.encoding_key,
-    )?;
+    let token = encode(&Header::new(Algorithm::ES256), &claims, &state.encoding_key)?;
 
     Ok(Json(AttestResponse {
         token,
