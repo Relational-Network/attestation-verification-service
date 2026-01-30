@@ -10,7 +10,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # Force lowercase for Docker compatibility
+  IMAGE_NAME: relational-network/attestation-verification-service
 
 jobs:
   build-and-push:
@@ -59,7 +60,6 @@ jobs:
     name: Deploy to Staging
     runs-on: ubuntu-latest
     needs: build-and-push
-    environment: staging
     steps:
       - name: Deploy AVS via SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -69,7 +69,7 @@ jobs:
           key: ${{ secrets.STAGING_SSH_KEY }}
           script: |
             echo "=== Pulling latest AVS image ==="
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging-latest
+            docker pull ghcr.io/relational-network/attestation-verification-service:staging-latest
             
             echo "=== Restarting AVS service ==="
             sudo systemctl restart avs
