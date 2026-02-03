@@ -35,6 +35,7 @@
 //! cargo run
 //! ```
 
+mod clerk_auth;
 mod config;
 mod error;
 mod handlers;
@@ -129,7 +130,9 @@ async fn run() -> Result<(), AppError> {
         std::str::from_utf8(&signing_key_pem)
             .map_err(|err| AppError::Config(format!("invalid signing key encoding: {err}")))?,
     )?;
-    let public_jwk = jwk_for_public_key(&secret_key.public_key(), "sig", "ES256");
+    let mut public_jwk = jwk_for_public_key(&secret_key.public_key(), "sig", "ES256");
+    // Override the kid with the configured signing_key_id so it matches JWT headers
+    public_jwk.kid = config.signing_key_id.clone();
 
     // RA-TLS verifier is not thread-safe; guard with a mutex.
     let ratls = Arc::new(std::sync::Mutex::new(RaTlsVerifier::new(

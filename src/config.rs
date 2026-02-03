@@ -24,6 +24,7 @@ pub struct Config {
     pub issuer: String,
     pub token_ttl_secs: u64,
     pub signing_key_path: PathBuf,
+    pub signing_key_id: String,
     pub tls_cert_path: Option<PathBuf>,
     pub tls_key_path: Option<PathBuf>,
     pub ratls_verify_lib: PathBuf,
@@ -36,6 +37,8 @@ pub struct Config {
     pub allow_hw_config_needed: bool,
     pub allow_sw_hardening_needed: bool,
     pub allowed_enclave_hosts: Vec<String>,
+    /// Clerk JWKS URL for token verification (optional, enables Clerk auth)
+    pub clerk_jwks_url: Option<String>,
 }
 
 impl Config {
@@ -67,6 +70,8 @@ impl Config {
     /// - `AVS_ALLOW_HW_CONFIG_NEEDED`: Allow hardware config needed (set to `1`)
     /// - `AVS_ALLOW_SW_HARDENING_NEEDED`: Allow software hardening needed (set to `1`)
     /// - `AVS_ALLOWED_ENCLAVE_HOSTS`: Comma-separated allowlist of enclave hosts
+    /// - `AVS_SIGNING_KEY_ID`: Key ID for JWT header (default: `avs-signing-key-1`)
+    /// - `CLERK_JWKS_URL`: Clerk JWKS URL for token verification (enables Clerk auth)
     pub fn from_env() -> Result<Self, String> {
         let bind_addr = env::var("AVS_BIND_ADDR")
             .unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string())
@@ -82,6 +87,9 @@ impl Config {
         let signing_key_path = env::var("AVS_SIGNING_KEY_PATH")
             .map(PathBuf::from)
             .map_err(|_| "AVS_SIGNING_KEY_PATH is required".to_string())?;
+
+        let signing_key_id = env::var("AVS_SIGNING_KEY_ID")
+            .unwrap_or_else(|_| "avs-signing-key-1".to_string());
 
         let tls_cert_path = env::var("AVS_TLS_CERT_PATH").ok().map(PathBuf::from);
         let tls_key_path = env::var("AVS_TLS_KEY_PATH").ok().map(PathBuf::from);
@@ -128,11 +136,14 @@ impl Config {
             .map(|value| value.to_string())
             .collect::<Vec<_>>();
 
+        let clerk_jwks_url = env::var("CLERK_JWKS_URL").ok();
+
         Ok(Self {
             bind_addr,
             issuer,
             token_ttl_secs,
             signing_key_path,
+            signing_key_id,
             tls_cert_path,
             tls_key_path,
             ratls_verify_lib,
@@ -145,6 +156,7 @@ impl Config {
             allow_hw_config_needed,
             allow_sw_hardening_needed,
             allowed_enclave_hosts,
+            clerk_jwks_url,
         })
     }
 

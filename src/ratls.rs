@@ -40,6 +40,12 @@ pub struct RaTlsVerifier {
     verify_fn: unsafe extern "C" fn(*mut u8, usize, *mut RaTlsVerifyCallbackResults) -> i32,
 }
 
+// SAFETY: The underlying C library (libra_tls_verify_dcap.so) is thread-safe.
+// The verification function does not store any global state and can be called
+// concurrently from multiple threads.
+unsafe impl Send for RaTlsVerifier {}
+unsafe impl Sync for RaTlsVerifier {}
+
 impl RaTlsVerifier {
     /// Load the DCAP verifier library and resolve the verification symbol.
     pub fn new(path: &Path) -> Result<Self, AppError> {

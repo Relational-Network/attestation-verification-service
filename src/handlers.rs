@@ -20,6 +20,7 @@ use tracing::warn;
 use url::Url;
 use utoipa::ToSchema;
 
+use crate::clerk_auth::ClerkAuth;
 use crate::config::Config;
 use crate::error::AppError;
 use crate::jwk::{Jwk, JwkSet};
@@ -151,8 +152,33 @@ pub async fn jwks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 )]
 pub async fn attest(
     State(state): State<Arc<AppState>>,
+    clerk_auth: ClerkAuth,
     Json(request): Json<AttestRequest>,
 ) -> Result<Json<AttestResponse>, AppError> {
+    // Extract user info from Clerk auth (if available)
+    let (user_id, role) = match clerk_auth.0 {
+        Some(user) => {
+            // User authenticated via Clerk - use their ID
+            // Role is "user" by default; admin role should be verified by dashboard
+            (user.user_id, user.role)
+        }
+        None => {
+            // No Clerk auth - check if CLERK_JWKS_URL is configured
+            if state.config.clerk_jwks_url.is_some() {
+                // Auth is required but not provided
+                return Err(AppError::Unauthorized(
+                    "Authentication required".to_string(),
+                ));
+            }
+            // Backward compatibility: allow anonymous if Clerk not configured
+            warn!("Anonymous attestation request (CLERK_JWKS_URL not configured)");
+            (
+                request.user_id.unwrap_or_else(|| "anonymous".to_string()),
+                request.role.unwrap_or_else(|| "user".to_string()),
+            )
+        }
+    };
+
     // Parse and validate the enclave URL.
     let mut url = Url::parse(&request.enclave_url)?;
     if url.scheme() != "https" {
@@ -196,11 +222,11 @@ pub async fn attest(
 
     let claims = AttestationClaims {
         iss: state.config.issuer.clone(),
-        sub: request.user_id.unwrap_or_else(|| "anonymous".to_string()),
+        sub: user_id, // Use verified user_id from Clerk (or anonymous if not configured)
         aud: "relational-sdk".to_string(),
         iat,
         exp,
-        role: request.role.unwrap_or_else(|| "user".to_string()),
+        role, // Use verified role from Clerk (or default if not configured)
         enclave_url: request.enclave_url,
         enclave_public_key: enclave_public_key.clone(),
         policy: PolicyClaims {
@@ -212,7 +238,11 @@ pub async fn attest(
         nonce: request.nonce,
     };
 
-    let token = encode(&Header::new(Algorithm::ES256), &claims, &state.encoding_key)?;
+    // Create JWT header with kid for key rotation support
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some(state.config.signing_key_id.clone());
+
+    let token = encode(&header, &claims, &state.encoding_key)?;
 
     Ok(Json(AttestResponse {
         token,
@@ -262,41 +292,67 @@ fn fetch_enclave_public_key(
     stream.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(15)))?;
 
-    // Configure OpenSSL client and attach the RA-TLS verifier callback.
+    // Configure OpenSSL client for RA-TLS verification.
+    // RA-TLS uses self-signed certificates with the SGX quote embedded in an X.509 extension.
+    //
+    // APPROACH: We capture the leaf certificate during TLS handshake, then verify it
+    // AFTER the handshake completes. This avoids calling the DCAP verification library
+    // from within the OpenSSL callback context (which causes segfaults).
+    //
+    // Security: The certificate is bound to the TLS session - we verify the same cert
+    // that was used for key exchange, ensuring we're talking to the attested enclave.
     let mut builder = SslConnector::builder(SslMethod::tls())?;
-    builder.set_verify(SslVerifyMode::PEER);
-
-    let ratls_clone = ratls.clone();
+    
+    // Capture the leaf certificate DER for post-handshake verification
+    let cert_der = Arc::new(std::sync::Mutex::new(Option::<Vec<u8>>::None));
+    let cert_der_callback = cert_der.clone();
+    
+    // Set callback that captures the certificate and accepts it for now
     builder.set_verify_callback(SslVerifyMode::PEER, move |_preverify_ok, x509_ctx| {
+        // Only process the leaf certificate (depth 0)
         if x509_ctx.error_depth() != 0 {
             return true;
         }
-        let cert = match x509_ctx.current_cert() {
-            Some(cert) => cert,
-            None => return false,
-        };
-        let der = match cert.to_der() {
-            Ok(der) => der,
-            Err(_) => return false,
-        };
-        let guard = match ratls_clone.lock() {
-            Ok(guard) => guard,
-            Err(_) => return false,
-        };
-        match guard.verify_der(&der) {
-            Ok(_) => true,
-            Err(err) => {
-                warn!(error = %err, "RA-TLS verification failed");
-                false
+        
+        // Capture the certificate DER for post-handshake verification
+        if let Some(cert) = x509_ctx.current_cert() {
+            if let Ok(der) = cert.to_der() {
+                if let Ok(mut guard) = cert_der_callback.lock() {
+                    *guard = Some(der);
+                }
             }
         }
+        
+        // Accept the certificate for now - we'll verify it after handshake
+        true
     });
 
     let connector = builder.build();
-    // Perform the TLS handshake (RA-TLS verification happens above).
+    
+    // Perform the TLS handshake
     let mut tls_stream = connector
         .connect(&host, stream)
         .map_err(|err| AppError::EnclaveResponse(format!("TLS handshake failed: {err}")))?;
+
+    // Now verify the captured certificate using RA-TLS (DCAP quote verification)
+    // This happens OUTSIDE the OpenSSL callback context
+    let captured_der = cert_der
+        .lock()
+        .map_err(|_| AppError::EnclaveResponse("Failed to get captured certificate".to_string()))?
+        .take()
+        .ok_or_else(|| AppError::EnclaveResponse("No certificate captured during handshake".to_string()))?;
+
+    let guard = ratls.lock().map_err(|e| {
+        AppError::EnclaveResponse(format!("Failed to acquire RA-TLS verifier lock: {e}"))
+    })?;
+    
+    guard.verify_der(&captured_der).map_err(|err| {
+        warn!(error = %err, "RA-TLS verification failed");
+        AppError::EnclaveResponse(format!("RA-TLS attestation failed: {err}"))
+    })?;
+    
+    tracing::info!("RA-TLS verification succeeded - SGX quote is valid");
+    drop(guard);
 
     // Minimal HTTP/1.1 request to avoid extra client dependencies.
     let request = format!(

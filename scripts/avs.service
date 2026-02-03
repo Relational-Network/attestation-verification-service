@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Relational Network
+#
+# Systemd service for Attestation Verification Service (Docker)
+#
+# Installation:
+#   sudo cp avs.service /etc/systemd/system/avs.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable avs
+#   sudo systemctl start avs
+#
+# Logs:
+#   sudo journalctl -u avs -f
+#
+# Prerequisites:
+#   - Docker installed and running
+#   - AVS signing key at /opt/iob-micres/secrets/avs-signing-key.pem
+#   - Environment file at /opt/iob-micres/.env with:
+#       AVS_EXPECTED_MRSIGNER=<hex>
+#       AVS_EXPECTED_MRENCLAVE=<hex>
+#       AVS_ALLOW_DEBUG_ENCLAVE=1  (for debug enclaves)
+#       AVS_ALLOW_OUTDATED_TCB=1   (for outdated TCB)
+
+[Unit]
+Description=Attestation Verification Service (Docker)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/iob-micres/.env
+
+# Stop and remove any existing container
+ExecStartPre=-/usr/bin/docker stop avs
+ExecStartPre=-/usr/bin/docker rm avs
+
+# Pull latest image (optional, CD handles this)
+ExecStartPre=/usr/bin/docker pull ghcr.io/relational-network/attestation-verification-service:staging-latest
+
+# Run the AVS container
+# - Uses host networking for enclave communication
+# - Mounts signing key for JWT issuance
+# - Reads measurements from environment file
+ExecStart=/usr/bin/docker run --rm --name avs \
+    --network host \
+    -v /opt/iob-micres/secrets/avs-signing-key.pem:/secrets/avs-signing-key.pem:ro \
+    -e AVS_BIND_ADDR=127.0.0.1:9100 \
+    -e AVS_SIGNING_KEY_PATH=/secrets/avs-signing-key.pem \
+    -e AVS_EXPECTED_MRSIGNER=${AVS_EXPECTED_MRSIGNER} \
+    -e AVS_EXPECTED_MRENCLAVE=${AVS_EXPECTED_MRENCLAVE} \
+    -e AVS_ALLOW_DEBUG_ENCLAVE=${AVS_ALLOW_DEBUG_ENCLAVE:-0} \
+    -e AVS_ALLOW_OUTDATED_TCB=${AVS_ALLOW_OUTDATED_TCB:-0} \
+    -e RUST_LOG=${RUST_LOG:-info} \
+    ghcr.io/relational-network/attestation-verification-service:staging-latest
+
+ExecStop=/usr/bin/docker stop avs
+
+[Install]
+WantedBy=multi-user.target

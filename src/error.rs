@@ -38,6 +38,8 @@ pub enum AppError {
     Attestation(String),
     #[error("enclave response error: {0}")]
     EnclaveResponse(String),
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
 }
 
 impl IntoResponse for AppError {
@@ -48,6 +50,7 @@ impl IntoResponse for AppError {
             AppError::Url(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             AppError::Attestation(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             AppError::EnclaveResponse(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
+            AppError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
         };
 

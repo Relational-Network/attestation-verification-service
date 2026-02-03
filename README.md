@@ -164,6 +164,35 @@ docker pull ghcr.io/relational-network/attestation-verification-service:staging-
 sudo systemctl restart avs
 ```
 
+### Systemd Service (Docker-based)
+
+The AVS runs as a Docker container managed by systemd for auto-start on boot:
+
+```bash
+# Install service file (from this repo)
+sudo cp scripts/avs.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable avs
+sudo systemctl start avs
+
+# View logs
+sudo journalctl -u avs -f
+
+# Status
+sudo systemctl status avs
+```
+
+**Prerequisites on the VM:**
+- Docker installed and running
+- Signing key at `/opt/iob-micres/secrets/avs-signing-key.pem`
+- Environment file at `/opt/iob-micres/.env` with measurements
+
+**Generate signing key (first time only):**
+```bash
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+  -out /opt/iob-micres/secrets/avs-signing-key.pem
+```
+
 ## Development
 
 ### Run locally (HTTP)
