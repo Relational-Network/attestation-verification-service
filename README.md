@@ -106,6 +106,64 @@ Note: At least one of `AVS_EXPECTED_MRSIGNER` or `AVS_EXPECTED_MRENCLAVE` must b
 | `AVS_TLS_CERT_PATH` | (none) | Path to TLS certificate (PEM) - enables HTTPS |
 | `AVS_TLS_KEY_PATH` | (none) | Path to TLS private key (PEM) - enables HTTPS |
 
+## Staging Deployment
+
+**Live URL:** https://iob-staging.duckdns.org (via Caddy reverse proxy)
+
+**Docker Image:** `ghcr.io/relational-network/attestation-verification-service:staging-latest`
+
+The staging AVS runs as a Docker container on the Azure DCsv3 VM (`iob-staging`).
+
+### Verify Staging
+
+```bash
+# Health check (via Caddy)
+curl https://iob-staging.duckdns.org/avs/health
+
+# JWKS endpoint
+curl https://iob-staging.duckdns.org/.well-known/jwks.json
+
+# Test attestation (requires enclave running)
+curl -X POST https://iob-staging.duckdns.org/v1/attest \
+  -H 'Content-Type: application/json' \
+  -d '{"enclave_url":"https://127.0.0.1:8080"}'
+```
+
+## CI/CD
+
+This repo uses GitHub Actions for automated CI/CD:
+
+- **CI** (`.github/workflows/ci.yml`): Runs on push/PR to `main`/`staging`
+  - Lint (rustfmt, clippy)
+  - Test (`cargo test`)
+  - Build Docker image
+  - Security audit (`cargo-audit`)
+
+- **CD** (`.github/workflows/cd-staging.yml`): Runs on push to `staging`
+  - Builds Docker image
+  - Pushes to GHCR (`ghcr.io/relational-network/attestation-verification-service:staging-latest`)
+  - Deploys to staging VM via SSH
+
+### Required GitHub Secrets
+
+| Secret | Description |
+|--------|-------------|
+| `STAGING_HOST` | Staging VM IP (e.g., `20.86.174.127`) |
+| `STAGING_USER` | SSH user (e.g., `azureuser`) |
+| `STAGING_SSH_KEY` | SSH private key for deployment |
+| `GHCR_TOKEN` | PAT with `read:packages`, `write:packages` |
+
+### Manual Deployment
+
+```bash
+# SSH to staging VM
+ssh azureuser@20.86.174.127
+
+# Pull latest image and restart
+docker pull ghcr.io/relational-network/attestation-verification-service:staging-latest
+sudo systemctl restart avs
+```
+
 ## Development
 
 ### Run locally (HTTP)
@@ -221,26 +279,10 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out avs-signing-key.pem
 ```
 
-## CI/CD
+## Related Documentation
 
-This repo uses GitHub Actions:
-
-- **CI** (`.github/workflows/ci.yml`): Runs on push/PR to main/staging
-  - Lint (rustfmt, clippy)
-  - Test
-  - Build Docker image
-  - Security audit
-
-- **CD** (`.github/workflows/cd-staging.yml`): Runs on push to staging
-  - Build and push Docker image to GHCR
-  - Deploy to staging environment
-
-### Required Secrets
-
-| Secret | Description |
-|--------|-------------|
-| `GITHUB_TOKEN` | Automatic, for GHCR |
-| `STAGING_SSH_HOST` | (optional) SSH host for deployment |
+- [STAGING-DEPLOYMENT.md](../STAGING-DEPLOYMENT.md) - Full staging deployment guide
+- [AGENTS.md](../AGENTS.md) - Architecture and development context
 
 ## API
 
