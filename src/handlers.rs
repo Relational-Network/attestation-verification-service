@@ -315,37 +315,21 @@ fn fetch_enclave_public_key(
     // Configure OpenSSL client for RA-TLS verification.
     // RA-TLS uses self-signed certificates with the SGX quote embedded in an X.509 extension.
     //
-    // APPROACH: We capture the leaf certificate during TLS handshake, then verify it
-    // AFTER the handshake completes. This avoids calling the DCAP verification library
+    // APPROACH: We disable OpenSSL's built-in verification (since RA-TLS certs are self-signed),
+    // complete the TLS handshake, then extract the peer certificate and verify it using the
+    // DCAP library AFTER the handshake. This avoids calling the DCAP verification library
     // from within the OpenSSL callback context (which causes segfaults).
     //
     // Security: The certificate is bound to the TLS session - we verify the same cert
     // that was used for key exchange, ensuring we're talking to the attested enclave.
     let mut builder = SslConnector::builder(SslMethod::tls())?;
 
-    // Capture the leaf certificate DER for post-handshake verification
-    let cert_der = Arc::new(std::sync::Mutex::new(Option::<Vec<u8>>::None));
-    let cert_der_callback = cert_der.clone();
-
-    // Set callback that captures the certificate and accepts it for now
-    builder.set_verify_callback(SslVerifyMode::PEER, move |_preverify_ok, x509_ctx| {
-        // Only process the leaf certificate (depth 0)
-        if x509_ctx.error_depth() != 0 {
-            return true;
-        }
-
-        // Capture the certificate DER for post-handshake verification
-        if let Some(cert) = x509_ctx.current_cert() {
-            if let Ok(der) = cert.to_der() {
-                if let Ok(mut guard) = cert_der_callback.lock() {
-                    *guard = Some(der);
-                }
-            }
-        }
-
-        // Accept the certificate for now - we'll verify it after handshake
-        true
-    });
+    // Disable OpenSSL's certificate verification - we'll verify via DCAP after handshake
+    // This is safe because:
+    // 1. RA-TLS certificates are self-signed (would fail normal verification anyway)
+    // 2. We verify the certificate's embedded SGX quote after handshake
+    // 3. The certificate is cryptographically bound to the TLS session
+    builder.set_verify(SslVerifyMode::NONE);
 
     let connector = builder.build();
 
@@ -354,21 +338,23 @@ fn fetch_enclave_public_key(
         .connect(&host, stream)
         .map_err(|err| AppError::EnclaveResponse(format!("TLS handshake failed: {err}")))?;
 
-    // Now verify the captured certificate using RA-TLS (DCAP quote verification)
-    // This happens OUTSIDE the OpenSSL callback context
-    let captured_der = cert_der
-        .lock()
-        .map_err(|_| AppError::EnclaveResponse("Failed to get captured certificate".to_string()))?
-        .take()
-        .ok_or_else(|| {
-            AppError::EnclaveResponse("No certificate captured during handshake".to_string())
-        })?;
+    // Get the peer certificate from the completed TLS session
+    let peer_cert = tls_stream
+        .ssl()
+        .peer_certificate()
+        .ok_or_else(|| AppError::EnclaveResponse("No peer certificate received".to_string()))?;
 
+    let cert_der = peer_cert
+        .to_der()
+        .map_err(|e| AppError::EnclaveResponse(format!("Failed to encode certificate: {e}")))?;
+
+    // Now verify the certificate using RA-TLS (DCAP quote verification)
+    // This happens OUTSIDE the OpenSSL handshake context
     let guard = ratls.lock().map_err(|e| {
         AppError::EnclaveResponse(format!("Failed to acquire RA-TLS verifier lock: {e}"))
     })?;
 
-    guard.verify_der(&captured_der).map_err(|err| {
+    guard.verify_der(&cert_der).map_err(|err| {
         warn!(error = %err, "RA-TLS verification failed");
         AppError::EnclaveResponse(format!("RA-TLS attestation failed: {err}"))
     })?;
