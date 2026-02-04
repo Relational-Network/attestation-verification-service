@@ -88,6 +88,48 @@ const { payload } = await jose.jwtVerify(token, jwks, {
 
 Note: At least one of `AVS_EXPECTED_MRSIGNER` or `AVS_EXPECTED_MRENCLAVE` must be set (not `any`).
 
+## Clerk Authentication (Optional)
+
+When `CLERK_JWKS_URL` is set, AVS requires authenticated requests to `/v1/attest`.
+
+### Clerk Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `CLERK_JWKS_URL` | Clerk JWKS endpoint (e.g., `https://your-instance.clerk.accounts.dev/.well-known/jwks.json`) |
+| `CLERK_EXPECTED_AUD` | Expected audience claim (optional, for extra validation) |
+
+### ⚠️ IMPORTANT: Clerk JWT Template Configuration
+
+Clerk's default JWT **does NOT include `publicMetadata`**. To enable role-based access:
+
+1. Go to **Clerk Dashboard** → **JWT Templates**
+2. Create a new template (or edit `default`)
+3. Add `publicMetadata` to the claims:
+
+```json
+{
+  "publicMetadata": "{{user.public_metadata}}"
+}
+```
+
+4. Save the template
+
+Without this configuration, all users will default to role `user` regardless of their `publicMetadata.role` setting.
+
+### Setting User Roles in Clerk
+
+1. Go to **Clerk Dashboard** → **Users** → Select a user
+2. Under **Public Metadata**, add:
+
+```json
+{
+  "role": "admin"
+}
+```
+
+Valid roles: `admin`, `user`, `read_only`
+
 ## Optional environment
 
 | Variable | Default | Description |
@@ -195,6 +237,97 @@ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
 
 ## Development
 
+### Build Requirements
+
+⚠️ **IMPORTANT:** This project uses `aws-lc-rs` for cryptography, which requires **clang** 
+to compile on Ubuntu 20.04. GCC 9.4 has a memcmp bug that aws-lc-rs refuses to compile against.
+
+```bash
+# Install clang (Ubuntu 20.04)
+sudo apt-get install -y clang
+
+# Build with clang
+CC=clang CXX=clang++ cargo build --release
+```
+
+## Local Development (Full Stack)
+
+### Prerequisites
+
+- **SGX Hardware**: Azure DCsv3 VM or bare-metal with SGX enabled (for enclave)
+- **Clang**: `sudo apt install clang`
+- **Gramine**: `sudo apt install gramine` (for enclave)
+- **AVS signing key**: Generate with `cd secrets && ./generate-keys.sh`
+
+### Quick Start (3 terminals)
+
+**Terminal 1 - AVS:**
+```bash
+cd /path/to/attestation-verification-service
+
+# Generate signing key (first time only)
+cd secrets && ./generate-keys.sh && cd ..
+
+# Build
+CC=clang CXX=clang++ cargo build --release
+
+# Run
+AVS_SIGNING_KEY_PATH="$(pwd)/secrets/avs-signing-key.pem" \
+AVS_ALLOW_DEBUG_ENCLAVE=1 \
+AVS_ALLOW_OUTDATED_TCB=1 \
+RUST_LOG=info \
+./target/release/attestation-verification-service
+```
+
+**Terminal 2 - Enclave:**
+```bash
+cd /path/to/relational-sdk
+CC=clang CXX=clang++ make SGX=1 RA_TYPE=dcap SGX_DEBUG=1
+gramine-sgx relational-sdk
+```
+
+**Terminal 3 - Dashboard:**
+```bash
+cd /path/to/iob-dashboard
+pnpm dev
+```
+
+### Test Endpoints
+
+```bash
+# Health check
+curl -s http://127.0.0.1:9100/health
+
+# JWKS endpoint (used by enclave for token validation)
+curl -s http://127.0.0.1:9100/.well-known/jwks.json | jq
+
+# Attestation (requires Clerk auth - use dashboard, or see curl example below)
+# Note: Without CLERK_JWKS_URL set, auth is skipped for backward compatibility
+
+# Test attestation without Clerk (no auth)
+curl -s -X POST http://127.0.0.1:9100/v1/attest \
+  -H 'Content-Type: application/json' \
+  -d '{"enclave_url":"https://127.0.0.1:8080"}' | jq
+```
+
+### Environment Variables for Local Dev
+
+```bash
+# Required
+AVS_SIGNING_KEY_PATH=./secrets/avs-signing-key.pem
+
+# For debug enclaves
+AVS_ALLOW_DEBUG_ENCLAVE=1
+AVS_ALLOW_OUTDATED_TCB=1
+
+# Logging
+RUST_LOG=info  # or trace, debug, warn, error
+
+# Optional: Clerk authentication
+# CLERK_JWKS_URL=https://your-instance.clerk.accounts.dev/.well-known/jwks.json
+# CLERK_EXPECTED_AUD=your-app-id
+```
+
 ### Run locally (HTTP)
 
 ```bash
@@ -205,7 +338,7 @@ cd secrets && ./generate-keys.sh
 export AVS_SIGNING_KEY_PATH=./secrets/avs-signing-key.pem
 export AVS_EXPECTED_MRSIGNER=<hex>
 export AVS_ALLOW_DEBUG_ENCLAVE=1  # for development only
-cargo run
+CC=clang CXX=clang++ cargo run --release
 ```
 
 ### Run locally (HTTPS)
