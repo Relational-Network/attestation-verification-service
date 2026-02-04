@@ -66,6 +66,11 @@ impl RaTlsVerifier {
     }
 
     /// Verify an RA-TLS certificate in DER format using DCAP.
+    ///
+    /// # Safety
+    /// The underlying C function `ra_tls_verify_callback_extended_der` reads from
+    /// the DER buffer but does not write to it (verified by Gramine source code).
+    /// We copy to a mutable Vec to satisfy the FFI signature safely.
     pub fn verify_der(&self, der: &[u8]) -> Result<(), AppError> {
         let mut results = RaTlsVerifyCallbackResults {
             attestation_scheme: 0,
@@ -75,10 +80,13 @@ impl RaTlsVerifier {
                 quote_verification_result: 0,
             },
         };
+        // Copy to mutable buffer to satisfy FFI signature.
+        // The C function only reads from this buffer, but the signature requires *mut.
+        let mut der_buf = der.to_vec();
         let ret = unsafe {
             (self.verify_fn)(
-                der.as_ptr() as *mut u8,
-                der.len(),
+                der_buf.as_mut_ptr(),
+                der_buf.len(),
                 &mut results as *mut RaTlsVerifyCallbackResults,
             )
         };

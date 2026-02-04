@@ -88,8 +88,8 @@ impl Config {
             .map(PathBuf::from)
             .map_err(|_| "AVS_SIGNING_KEY_PATH is required".to_string())?;
 
-        let signing_key_id = env::var("AVS_SIGNING_KEY_ID")
-            .unwrap_or_else(|_| "avs-signing-key-1".to_string());
+        let signing_key_id =
+            env::var("AVS_SIGNING_KEY_ID").unwrap_or_else(|_| "avs-signing-key-1".to_string());
 
         let tls_cert_path = env::var("AVS_TLS_CERT_PATH").ok().map(PathBuf::from);
         let tls_key_path = env::var("AVS_TLS_KEY_PATH").ok().map(PathBuf::from);

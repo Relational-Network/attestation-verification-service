@@ -42,7 +42,7 @@ mod handlers;
 mod jwk;
 mod ratls;
 
-use axum::{routing::get, routing::post, Router};
+use axum::{extract::DefaultBodyLimit, routing::get, routing::post, Router};
 use dotenvy::dotenv;
 use jsonwebtoken::EncodingKey;
 use p256::pkcs8::DecodePrivateKey;
@@ -148,11 +148,13 @@ async fn run() -> Result<(), AppError> {
     });
 
     // HTTP routing + Swagger UI for docs.
+    // Body limit: 1MB max to prevent DoS
     let app = Router::new()
         .route("/health", get(health))
         .route("/v1/attest", post(attest))
         .route("/.well-known/jwks.json", get(jwks))
         .merge(SwaggerUi::new("/docs").url("/api-doc/openapi.json", ApiDoc::openapi()))
+        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1MB max request body
         .with_state(state.clone());
 
     // Bind listener.

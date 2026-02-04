@@ -22,6 +22,16 @@ use crate::error::AppError;
 /// JWKS cache TTL (5 minutes)
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 
+/// Public metadata from Clerk user profile
+/// Configure in Clerk Dashboard: Users → Select User → Public Metadata
+/// Example: { "role": "admin" }
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ClerkPublicMetadata {
+    /// User role for RBAC (e.g., "admin", "user", "read_only")
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
 /// Clerk JWT claims structure
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClerkClaims {
@@ -29,9 +39,9 @@ pub struct ClerkClaims {
     pub sub: String,
     /// Issuer (Clerk instance URL)
     pub iss: String,
-    /// Audience
+    /// Audience (may be array or string)
     #[serde(default)]
-    pub aud: Option<String>,
+    pub aud: Option<serde_json::Value>,
     /// Issued at timestamp
     pub iat: u64,
     /// Expiration timestamp
@@ -42,10 +52,15 @@ pub struct ClerkClaims {
     /// Session ID
     #[serde(default)]
     pub sid: Option<String>,
+    /// Public metadata from user profile (includes role)
+    /// NOTE: Requires Clerk JWT template to include publicMetadata
+    #[serde(default, rename = "publicMetadata")]
+    pub public_metadata: Option<ClerkPublicMetadata>,
 }
 
 /// Authenticated user info extracted from Clerk JWT
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields used for future features
 pub struct AuthenticatedUser {
     pub user_id: String,
     pub role: String,
@@ -54,12 +69,13 @@ pub struct AuthenticatedUser {
 
 /// JWK structure for RS256 keys from Clerk
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Fields used for deserialization
 pub struct ClerkJwk {
     pub kty: String,
     pub kid: String,
     pub alg: Option<String>,
-    pub n: Option<String>,  // RSA modulus
-    pub e: Option<String>,  // RSA exponent
+    pub n: Option<String>, // RSA modulus
+    pub e: Option<String>, // RSA exponent
     #[serde(rename = "use")]
     pub key_use: Option<String>,
 }
@@ -82,7 +98,7 @@ static JWKS_CACHE: RwLock<Option<CachedJwks>> = RwLock::new(None);
 /// Fetch and cache Clerk JWKS
 pub async fn fetch_clerk_jwks(jwks_url: &str) -> Result<(), AppError> {
     debug!("Fetching Clerk JWKS from {}", jwks_url);
-    
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -124,12 +140,14 @@ pub async fn fetch_clerk_jwks(jwks_url: &str) -> Result<(), AppError> {
     }
 
     if keys.is_empty() {
-        return Err(AppError::Config("No valid RSA keys found in Clerk JWKS".to_string()));
+        return Err(AppError::Config(
+            "No valid RSA keys found in Clerk JWKS".to_string(),
+        ));
     }
 
-    let mut cache = JWKS_CACHE.write().map_err(|_| {
-        AppError::Config("Failed to acquire JWKS cache write lock".to_string())
-    })?;
+    let mut cache = JWKS_CACHE
+        .write()
+        .map_err(|_| AppError::Config("Failed to acquire JWKS cache write lock".to_string()))?;
     *cache = Some(CachedJwks {
         keys,
         fetched_at: Instant::now(),
@@ -143,10 +161,10 @@ pub async fn fetch_clerk_jwks(jwks_url: &str) -> Result<(), AppError> {
 async fn get_decoding_key(kid: &str, jwks_url: &str) -> Result<DecodingKey, AppError> {
     // Check cache first
     {
-        let cache = JWKS_CACHE.read().map_err(|_| {
-            AppError::Config("Failed to acquire JWKS cache read lock".to_string())
-        })?;
-        
+        let cache = JWKS_CACHE
+            .read()
+            .map_err(|_| AppError::Config("Failed to acquire JWKS cache read lock".to_string()))?;
+
         if let Some(cached) = &*cache {
             if cached.fetched_at.elapsed() < JWKS_CACHE_TTL {
                 if let Some(key) = cached.keys.get(kid) {
@@ -160,10 +178,10 @@ async fn get_decoding_key(kid: &str, jwks_url: &str) -> Result<DecodingKey, AppE
     fetch_clerk_jwks(jwks_url).await?;
 
     // Try again
-    let cache = JWKS_CACHE.read().map_err(|_| {
-        AppError::Config("Failed to acquire JWKS cache read lock".to_string())
-    })?;
-    
+    let cache = JWKS_CACHE
+        .read()
+        .map_err(|_| AppError::Config("Failed to acquire JWKS cache read lock".to_string()))?;
+
     if let Some(cached) = &*cache {
         if let Some(key) = cached.keys.get(kid) {
             return Ok(key.clone());
@@ -177,18 +195,16 @@ async fn get_decoding_key(kid: &str, jwks_url: &str) -> Result<DecodingKey, AppE
 }
 
 /// Verify a Clerk JWT and extract claims
-pub async fn verify_clerk_token(
-    token: &str,
-    jwks_url: &str,
-) -> Result<ClerkClaims, AppError> {
+///
+/// If CLERK_EXPECTED_AUD is set, validates the audience claim.
+pub async fn verify_clerk_token(token: &str, jwks_url: &str) -> Result<ClerkClaims, AppError> {
     // Decode header to get kid
-    let header = decode_header(token).map_err(|e| {
-        AppError::Unauthorized(format!("Invalid token header: {}", e))
-    })?;
+    let header = decode_header(token)
+        .map_err(|e| AppError::Unauthorized(format!("Invalid token header: {}", e)))?;
 
-    let kid = header.kid.ok_or_else(|| {
-        AppError::Unauthorized("Token missing kid in header".to_string())
-    })?;
+    let kid = header
+        .kid
+        .ok_or_else(|| AppError::Unauthorized("Token missing kid in header".to_string()))?;
 
     // Get decoding key
     let key = get_decoding_key(&kid, jwks_url).await?;
@@ -196,29 +212,39 @@ pub async fn verify_clerk_token(
     // Clerk uses RS256
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_exp = true;
-    validation.validate_aud = false; // Clerk tokens may not have aud
 
-    let token_data = decode::<ClerkClaims>(token, &key, &validation).map_err(|e| {
-        AppError::Unauthorized(format!("Token verification failed: {}", e))
-    })?;
+    // Check if audience validation is configured (N5 fix)
+    let expected_aud = std::env::var("CLERK_EXPECTED_AUD").ok();
+    if let Some(ref aud) = expected_aud {
+        validation.validate_aud = true;
+        validation.set_audience(&[aud]);
+        debug!("Validating Clerk token audience: {}", aud);
+    } else {
+        validation.validate_aud = false;
+        debug!("CLERK_EXPECTED_AUD not set, skipping audience validation");
+    }
+
+    let token_data = decode::<ClerkClaims>(token, &key, &validation)
+        .map_err(|e| AppError::Unauthorized(format!("Token verification failed: {}", e)))?;
 
     Ok(token_data.claims)
 }
 
 /// Extract user role from Clerk session claims (publicMetadata.role)
-/// 
+///
 /// NOTE: Clerk's standard JWT doesn't include publicMetadata by default.
 /// For MVP, we'll need to either:
 /// 1. Use Clerk Backend API to fetch user metadata
 /// 2. Configure Clerk to include role in session claims
 /// 3. Default to "user" role
-/// 
+///
 /// TODO: Integrate with Clerk Organizations for proper RBAC
+#[allow(dead_code)] // Reserved for future Clerk Backend API integration
 pub async fn get_user_role(user_id: &str, clerk_secret_key: Option<&str>) -> String {
     // For MVP: If we have Clerk secret key, we could fetch user metadata
     // For now, default to "user" - admin role must be set in Clerk publicMetadata
     // and verified via /api/user endpoint from dashboard
-    
+
     if clerk_secret_key.is_some() {
         // TODO: Implement Clerk Backend API call to get user metadata
         // GET https://api.clerk.com/v1/users/{user_id}
@@ -230,7 +256,7 @@ pub async fn get_user_role(user_id: &str, clerk_secret_key: Option<&str>) -> Str
 }
 
 /// Axum extractor for authenticated requests
-/// 
+///
 /// Extracts and verifies Clerk JWT from Authorization header.
 /// If CLERK_JWKS_URL is not configured, allows unauthenticated requests
 /// (for backward compatibility during migration).
@@ -274,9 +300,25 @@ where
         // Verify token
         match verify_clerk_token(token, &jwks_url).await {
             Ok(claims) => {
+                // Extract role from publicMetadata (N4 fix)
+                // Requires Clerk JWT template to include: {{user.public_metadata}}
+                let role = claims
+                    .public_metadata
+                    .as_ref()
+                    .and_then(|m| m.role.clone())
+                    .unwrap_or_else(|| {
+                        warn!(
+                            "No role in publicMetadata for user {}, defaulting to 'user'",
+                            claims.sub
+                        );
+                        "user".to_string()
+                    });
+
+                debug!("Authenticated user {} with role {}", claims.sub, role);
+
                 let user = AuthenticatedUser {
                     user_id: claims.sub,
-                    role: "user".to_string(), // Default, actual role from dashboard
+                    role,
                     email: None,
                 };
                 Ok(ClerkAuth(Some(user)))

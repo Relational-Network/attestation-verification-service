@@ -8,7 +8,12 @@
 //! - `GET /.well-known/jwks.json` - AVS signing public keys
 //! - `GET /health` - Service health check
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::State,
+    http::{header, StatusCode},
+    response::IntoResponse,
+    Json,
+};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use serde::{Deserialize, Serialize};
@@ -154,7 +159,7 @@ pub async fn attest(
     State(state): State<Arc<AppState>>,
     clerk_auth: ClerkAuth,
     Json(request): Json<AttestRequest>,
-) -> Result<Json<AttestResponse>, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     // Extract user info from Clerk auth (if available)
     let (user_id, role) = match clerk_auth.0 {
         Some(user) => {
@@ -244,11 +249,15 @@ pub async fn attest(
 
     let token = encode(&header, &claims, &state.encoding_key)?;
 
-    Ok(Json(AttestResponse {
-        token,
-        enclave_public_key,
-        expires_at: exp,
-    }))
+    // Return response with Cache-Control: no-store to prevent token caching
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(AttestResponse {
+            token,
+            enclave_public_key,
+            expires_at: exp,
+        }),
+    ))
 }
 
 /// Allowlist helper: match exact host or host:port.
@@ -288,7 +297,18 @@ fn fetch_enclave_public_key(
     };
 
     let address = format!("{host}:{port}");
-    let stream = TcpStream::connect(address)?;
+    let socket_addr: std::net::SocketAddr = address
+        .parse()
+        .or_else(|_| {
+            // DNS resolution needed
+            use std::net::ToSocketAddrs;
+            address.to_socket_addrs()?.next().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "DNS lookup failed")
+            })
+        })
+        .map_err(|e| AppError::EnclaveResponse(format!("invalid address {}: {}", address, e)))?;
+
+    let stream = TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(10))?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(15)))?;
 
@@ -302,18 +322,18 @@ fn fetch_enclave_public_key(
     // Security: The certificate is bound to the TLS session - we verify the same cert
     // that was used for key exchange, ensuring we're talking to the attested enclave.
     let mut builder = SslConnector::builder(SslMethod::tls())?;
-    
+
     // Capture the leaf certificate DER for post-handshake verification
     let cert_der = Arc::new(std::sync::Mutex::new(Option::<Vec<u8>>::None));
     let cert_der_callback = cert_der.clone();
-    
+
     // Set callback that captures the certificate and accepts it for now
     builder.set_verify_callback(SslVerifyMode::PEER, move |_preverify_ok, x509_ctx| {
         // Only process the leaf certificate (depth 0)
         if x509_ctx.error_depth() != 0 {
             return true;
         }
-        
+
         // Capture the certificate DER for post-handshake verification
         if let Some(cert) = x509_ctx.current_cert() {
             if let Ok(der) = cert.to_der() {
@@ -322,13 +342,13 @@ fn fetch_enclave_public_key(
                 }
             }
         }
-        
+
         // Accept the certificate for now - we'll verify it after handshake
         true
     });
 
     let connector = builder.build();
-    
+
     // Perform the TLS handshake
     let mut tls_stream = connector
         .connect(&host, stream)
@@ -340,17 +360,19 @@ fn fetch_enclave_public_key(
         .lock()
         .map_err(|_| AppError::EnclaveResponse("Failed to get captured certificate".to_string()))?
         .take()
-        .ok_or_else(|| AppError::EnclaveResponse("No certificate captured during handshake".to_string()))?;
+        .ok_or_else(|| {
+            AppError::EnclaveResponse("No certificate captured during handshake".to_string())
+        })?;
 
     let guard = ratls.lock().map_err(|e| {
         AppError::EnclaveResponse(format!("Failed to acquire RA-TLS verifier lock: {e}"))
     })?;
-    
+
     guard.verify_der(&captured_der).map_err(|err| {
         warn!(error = %err, "RA-TLS verification failed");
         AppError::EnclaveResponse(format!("RA-TLS attestation failed: {err}"))
     })?;
-    
+
     tracing::info!("RA-TLS verification succeeded - SGX quote is valid");
     drop(guard);
 
@@ -361,11 +383,13 @@ fn fetch_enclave_public_key(
     tls_stream.write_all(request.as_bytes())?;
     tls_stream.flush()?;
 
+    // Limit response size to prevent OOM from malicious enclave (64KB should be plenty for JWK)
+    const MAX_RESPONSE_SIZE: u64 = 64 * 1024;
     let mut response_bytes = Vec::new();
-    tls_stream.read_to_end(&mut response_bytes)?;
+    std::io::Read::take(&mut tls_stream, MAX_RESPONSE_SIZE).read_to_end(&mut response_bytes)?;
 
     // Parse HTTP response to locate the JSON body.
-    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut headers = [httparse::EMPTY_HEADER; 64]; // Increased from 32 for compatibility
     let mut response = httparse::Response::new(&mut headers);
     let status = response.parse(&response_bytes)?;
     let header_len = match status {
