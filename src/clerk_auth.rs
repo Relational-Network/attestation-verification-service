@@ -4,17 +4,21 @@
 //! Clerk JWT verification for incoming requests.
 //!
 //! Verifies Clerk-issued JWTs to authenticate users before issuing attestation tokens.
-//! Uses Clerk's JWKS endpoint for key verification.
+//! Uses OpenSSL for RS256 verification to avoid the vulnerable `rsa` crate (RUSTSEC-2023-0071).
+//!
+//! **SECURITY NOTE:** We use OpenSSL for RSA operations because the Rust `rsa` crate
+//! has an unfixed Marvin Attack vulnerability. Never add dependencies on `rsa` crate.
 
 use axum::{
     extract::FromRequestParts,
     http::{header::AUTHORIZATION, request::Parts, StatusCode},
 };
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use openssl::{bn::BigNum, hash::MessageDigest, pkey::PKey, rsa::Rsa, sign::Verifier};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::RwLock;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, warn};
 
 use crate::error::AppError;
@@ -74,8 +78,8 @@ pub struct ClerkJwk {
     pub kty: String,
     pub kid: String,
     pub alg: Option<String>,
-    pub n: Option<String>, // RSA modulus
-    pub e: Option<String>, // RSA exponent
+    pub n: Option<String>, // RSA modulus (base64url)
+    pub e: Option<String>, // RSA exponent (base64url)
     #[serde(rename = "use")]
     pub key_use: Option<String>,
 }
@@ -86,14 +90,74 @@ pub struct ClerkJwks {
     pub keys: Vec<ClerkJwk>,
 }
 
+/// Cached RSA public key using OpenSSL
+struct CachedRsaKey {
+    /// OpenSSL PKey for RS256 verification
+    pkey: PKey<openssl::pkey::Public>,
+}
+
 /// Cached JWKS with expiry
 struct CachedJwks {
-    keys: HashMap<String, DecodingKey>,
+    keys: HashMap<String, CachedRsaKey>,
     fetched_at: Instant,
 }
 
 /// Global JWKS cache
 static JWKS_CACHE: RwLock<Option<CachedJwks>> = RwLock::new(None);
+
+/// Create OpenSSL RSA public key from JWK components
+///
+/// Uses OpenSSL instead of the `rsa` crate to avoid RUSTSEC-2023-0071.
+fn create_rsa_public_key(
+    n_b64: &str,
+    e_b64: &str,
+) -> Result<PKey<openssl::pkey::Public>, AppError> {
+    // Decode base64url-encoded modulus and exponent
+    let n_bytes = URL_SAFE_NO_PAD
+        .decode(n_b64)
+        .map_err(|e| AppError::Config(format!("Failed to decode RSA modulus: {}", e)))?;
+    let e_bytes = URL_SAFE_NO_PAD
+        .decode(e_b64)
+        .map_err(|e| AppError::Config(format!("Failed to decode RSA exponent: {}", e)))?;
+
+    // Create OpenSSL BigNums
+    let n = BigNum::from_slice(&n_bytes)
+        .map_err(|e| AppError::Config(format!("Failed to create BigNum for modulus: {}", e)))?;
+    let e = BigNum::from_slice(&e_bytes)
+        .map_err(|e| AppError::Config(format!("Failed to create BigNum for exponent: {}", e)))?;
+
+    // Create RSA public key
+    let rsa = Rsa::from_public_components(n, e)
+        .map_err(|e| AppError::Config(format!("Failed to create RSA key: {}", e)))?;
+
+    // Convert to PKey
+    let pkey = PKey::from_rsa(rsa)
+        .map_err(|e| AppError::Config(format!("Failed to create PKey: {}", e)))?;
+
+    Ok(pkey)
+}
+
+/// Verify RS256 signature using OpenSSL
+///
+/// Uses OpenSSL instead of the `rsa` crate to avoid RUSTSEC-2023-0071.
+fn verify_rs256_signature(
+    pkey: &PKey<openssl::pkey::Public>,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<bool, AppError> {
+    let mut verifier = Verifier::new(MessageDigest::sha256(), pkey)
+        .map_err(|e| AppError::Config(format!("Failed to create verifier: {}", e)))?;
+
+    verifier
+        .update(message)
+        .map_err(|e| AppError::Config(format!("Failed to update verifier: {}", e)))?;
+
+    let result = verifier
+        .verify(signature)
+        .map_err(|e| AppError::Unauthorized(format!("Signature verification error: {}", e)))?;
+
+    Ok(result)
+}
 
 /// Fetch and cache Clerk JWKS
 pub async fn fetch_clerk_jwks(jwks_url: &str) -> Result<(), AppError> {
@@ -126,9 +190,9 @@ pub async fn fetch_clerk_jwks(jwks_url: &str) -> Result<(), AppError> {
     for jwk in jwks.keys {
         if jwk.kty == "RSA" {
             if let (Some(n), Some(e)) = (&jwk.n, &jwk.e) {
-                match DecodingKey::from_rsa_components(n, e) {
-                    Ok(key) => {
-                        keys.insert(jwk.kid.clone(), key);
+                match create_rsa_public_key(n, e) {
+                    Ok(pkey) => {
+                        keys.insert(jwk.kid.clone(), CachedRsaKey { pkey });
                         debug!("Cached Clerk JWK with kid: {}", jwk.kid);
                     }
                     Err(err) => {
@@ -157,8 +221,136 @@ pub async fn fetch_clerk_jwks(jwks_url: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Get a decoding key from cache, refreshing if needed
-async fn get_decoding_key(kid: &str, jwks_url: &str) -> Result<DecodingKey, AppError> {
+/// Decode JWT header without verification
+fn decode_jwt_header(token: &str) -> Result<(String, String), AppError> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(AppError::Unauthorized("Invalid JWT format".to_string()));
+    }
+
+    let header_json = URL_SAFE_NO_PAD
+        .decode(parts[0])
+        .map_err(|e| AppError::Unauthorized(format!("Failed to decode JWT header: {}", e)))?;
+
+    #[derive(Deserialize)]
+    struct JwtHeader {
+        alg: String,
+        kid: Option<String>,
+    }
+
+    let header: JwtHeader = serde_json::from_slice(&header_json)
+        .map_err(|e| AppError::Unauthorized(format!("Failed to parse JWT header: {}", e)))?;
+
+    if header.alg != "RS256" {
+        return Err(AppError::Unauthorized(format!(
+            "Unsupported algorithm: {}. Only RS256 is supported for Clerk.",
+            header.alg
+        )));
+    }
+
+    let kid = header
+        .kid
+        .ok_or_else(|| AppError::Unauthorized("Token missing kid in header".to_string()))?;
+
+    Ok((header.alg, kid))
+}
+
+/// Decode and verify JWT claims
+fn decode_jwt_claims(token: &str) -> Result<ClerkClaims, AppError> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(AppError::Unauthorized("Invalid JWT format".to_string()));
+    }
+
+    let claims_json = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .map_err(|e| AppError::Unauthorized(format!("Failed to decode JWT claims: {}", e)))?;
+
+    // Debug: log raw claims to see what Clerk is actually sending
+    if let Ok(raw) = String::from_utf8(claims_json.clone()) {
+        debug!("Raw JWT claims: {}", raw);
+    }
+
+    let claims: ClerkClaims = serde_json::from_slice(&claims_json)
+        .map_err(|e| AppError::Unauthorized(format!("Failed to parse JWT claims: {}", e)))?;
+
+    Ok(claims)
+}
+
+/// Verify a Clerk JWT and extract claims
+///
+/// If CLERK_EXPECTED_AUD is set, validates the audience claim.
+/// Uses OpenSSL for RS256 verification to avoid the vulnerable `rsa` crate.
+pub async fn verify_clerk_token(token: &str, jwks_url: &str) -> Result<ClerkClaims, AppError> {
+    // Decode header to get kid and algorithm
+    let (_alg, kid) = decode_jwt_header(token)?;
+
+    // Split token
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(AppError::Unauthorized("Invalid JWT format".to_string()));
+    }
+
+    let message = format!("{}.{}", parts[0], parts[1]);
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|e| AppError::Unauthorized(format!("Failed to decode signature: {}", e)))?;
+
+    // Get RSA key from cache, refreshing if needed
+    let pkey = get_rsa_key(&kid, jwks_url).await?;
+
+    // Verify signature using OpenSSL
+    let valid = verify_rs256_signature(&pkey, message.as_bytes(), &signature)?;
+    if !valid {
+        return Err(AppError::Unauthorized(
+            "Invalid token signature".to_string(),
+        ));
+    }
+
+    // Decode claims
+    let claims = decode_jwt_claims(token)?;
+
+    // Validate expiration
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AppError::Config("System time error".to_string()))?
+        .as_secs();
+
+    if claims.exp < now {
+        return Err(AppError::Unauthorized("Token has expired".to_string()));
+    }
+
+    // Check if audience validation is configured (N5 fix)
+    if let Ok(expected_aud) = std::env::var("CLERK_EXPECTED_AUD") {
+        debug!("Validating Clerk token audience: {}", expected_aud);
+
+        let aud_valid = match &claims.aud {
+            Some(serde_json::Value::String(aud)) => aud == &expected_aud,
+            Some(serde_json::Value::Array(auds)) => auds.iter().any(|a| {
+                if let serde_json::Value::String(s) = a {
+                    s == &expected_aud
+                } else {
+                    false
+                }
+            }),
+            _ => false,
+        };
+
+        if !aud_valid {
+            return Err(AppError::Unauthorized(format!(
+                "Token audience mismatch. Expected: {}",
+                expected_aud
+            )));
+        }
+    } else {
+        debug!("CLERK_EXPECTED_AUD not set, skipping audience validation");
+    }
+
+    Ok(claims)
+}
+
+/// Get RSA key from cache, refreshing if needed
+async fn get_rsa_key(kid: &str, jwks_url: &str) -> Result<PKey<openssl::pkey::Public>, AppError> {
     // Check cache first
     {
         let cache = JWKS_CACHE
@@ -168,7 +360,8 @@ async fn get_decoding_key(kid: &str, jwks_url: &str) -> Result<DecodingKey, AppE
         if let Some(cached) = &*cache {
             if cached.fetched_at.elapsed() < JWKS_CACHE_TTL {
                 if let Some(key) = cached.keys.get(kid) {
-                    return Ok(key.clone());
+                    // Clone the PKey - OpenSSL PKey is reference counted
+                    return Ok(key.pkey.clone());
                 }
             }
         }
@@ -184,7 +377,7 @@ async fn get_decoding_key(kid: &str, jwks_url: &str) -> Result<DecodingKey, AppE
 
     if let Some(cached) = &*cache {
         if let Some(key) = cached.keys.get(kid) {
-            return Ok(key.clone());
+            return Ok(key.pkey.clone());
         }
     }
 
@@ -192,42 +385,6 @@ async fn get_decoding_key(kid: &str, jwks_url: &str) -> Result<DecodingKey, AppE
         "No matching key found for kid: {}",
         kid
     )))
-}
-
-/// Verify a Clerk JWT and extract claims
-///
-/// If CLERK_EXPECTED_AUD is set, validates the audience claim.
-pub async fn verify_clerk_token(token: &str, jwks_url: &str) -> Result<ClerkClaims, AppError> {
-    // Decode header to get kid
-    let header = decode_header(token)
-        .map_err(|e| AppError::Unauthorized(format!("Invalid token header: {}", e)))?;
-
-    let kid = header
-        .kid
-        .ok_or_else(|| AppError::Unauthorized("Token missing kid in header".to_string()))?;
-
-    // Get decoding key
-    let key = get_decoding_key(&kid, jwks_url).await?;
-
-    // Clerk uses RS256
-    let mut validation = Validation::new(Algorithm::RS256);
-    validation.validate_exp = true;
-
-    // Check if audience validation is configured (N5 fix)
-    let expected_aud = std::env::var("CLERK_EXPECTED_AUD").ok();
-    if let Some(ref aud) = expected_aud {
-        validation.validate_aud = true;
-        validation.set_audience(&[aud]);
-        debug!("Validating Clerk token audience: {}", aud);
-    } else {
-        validation.validate_aud = false;
-        debug!("CLERK_EXPECTED_AUD not set, skipping audience validation");
-    }
-
-    let token_data = decode::<ClerkClaims>(token, &key, &validation)
-        .map_err(|e| AppError::Unauthorized(format!("Token verification failed: {}", e)))?;
-
-    Ok(token_data.claims)
 }
 
 /// Extract user role from Clerk session claims (publicMetadata.role)
