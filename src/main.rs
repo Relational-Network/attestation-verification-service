@@ -49,7 +49,6 @@ use p256::pkcs8::DecodePrivateKey;
 use p256::SecretKey;
 use rustls::ServerConfig;
 use std::fs;
-use std::io::BufReader;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -179,7 +178,10 @@ async fn run() -> Result<(), AppError> {
 }
 
 /// Load TLS configuration from certificate and key files.
+/// Uses pem crate instead of rustls-pemfile (which is unmaintained).
 fn load_tls_config(config: &Config) -> Result<ServerConfig, AppError> {
+    use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+
     let cert_path = config.tls_cert_path.as_ref().ok_or_else(|| {
         AppError::Config("TLS cert path required when TLS is enabled".to_string())
     })?;
@@ -188,19 +190,35 @@ fn load_tls_config(config: &Config) -> Result<ServerConfig, AppError> {
         .as_ref()
         .ok_or_else(|| AppError::Config("TLS key path required when TLS is enabled".to_string()))?;
 
-    // Load certificate chain
-    let cert_file = fs::File::open(cert_path)?;
-    let mut cert_reader = BufReader::new(cert_file);
-    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| AppError::Config(format!("failed to read certs: {e}")))?;
+    // Load certificate chain using pem crate
+    let cert_pem = fs::read_to_string(cert_path)
+        .map_err(|e| AppError::Config(format!("failed to read cert file: {e}")))?;
+    let certs: Vec<CertificateDer<'static>> = pem::parse_many(&cert_pem)
+        .map_err(|e| AppError::Config(format!("failed to parse certs: {e}")))?
+        .into_iter()
+        .filter(|p| p.tag() == "CERTIFICATE")
+        .map(|p| CertificateDer::from(p.into_contents()))
+        .collect();
 
-    // Load private key
-    let key_file = fs::File::open(key_path)?;
-    let mut key_reader = BufReader::new(key_file);
-    let key = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|e| AppError::Config(format!("failed to read key: {e}")))?
+    if certs.is_empty() {
+        return Err(AppError::Config(
+            "no certificates found in file".to_string(),
+        ));
+    }
+
+    // Load private key using pem crate
+    let key_pem = fs::read_to_string(key_path)
+        .map_err(|e| AppError::Config(format!("failed to read key file: {e}")))?;
+    let key_parsed = pem::parse_many(&key_pem)
+        .map_err(|e| AppError::Config(format!("failed to parse key: {e}")))?
+        .into_iter()
+        .find(|p| {
+            p.tag() == "PRIVATE KEY" || p.tag() == "RSA PRIVATE KEY" || p.tag() == "EC PRIVATE KEY"
+        })
         .ok_or_else(|| AppError::Config("no private key found in file".to_string()))?;
+
+    let key = PrivateKeyDer::try_from(key_parsed.into_contents())
+        .map_err(|e| AppError::Config(format!("failed to parse private key: {e}")))?;
 
     // Build TLS config
     let tls_config = ServerConfig::builder()

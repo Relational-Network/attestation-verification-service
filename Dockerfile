@@ -12,12 +12,20 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /build
 
 # Install Rust and build dependencies
+# NOTE: clang is required because aws-lc-rs (crypto library) refuses to compile
+# with GCC 9.4 due to a memcmp bug. See RUSTSEC-2023-0071 for why we use aws-lc-rs.
 RUN apt-get update && apt-get install -y \
     curl \
     build-essential \
+    clang \
+    cmake \
     pkg-config \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Set clang as the C/C++ compiler for aws-lc-rs
+ENV CC=clang
+ENV CXX=clang++
 
 # Install Rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
