@@ -59,7 +59,8 @@ use utoipa_swagger_ui::SwaggerUi;
 use config::Config;
 use error::AppError;
 use handlers::{
-    attest, health, jwks, start_dcap_worker, AppState, AttestRequest, AttestResponse, AttestationClaims, PolicyClaims,
+    attest, health, jwks, start_dcap_worker, AppState, AttestRequest, AttestResponse,
+    AttestationClaims, PolicyClaims,
 };
 use jwk::{jwk_for_public_key, Jwk, JwkSet};
 use ratls::RaTlsVerifier;

@@ -21,9 +21,9 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{info, warn};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time;
+use tracing::{info, warn};
 use url::Url;
 use utoipa::ToSchema;
 
@@ -53,8 +53,8 @@ pub fn start_dcap_worker(ratls: RaTlsVerifier) -> DcapWorker {
         .name("dcap-worker".to_string())
         .spawn(move || {
             while let Some(request) = rx.blocking_recv() {
-                let result = fetch_enclave_public_key_sync(request.url, &ratls)
-                    .map_err(|e| e.to_string());
+                let result =
+                    fetch_enclave_public_key_sync(request.url, &ratls).map_err(|e| e.to_string());
                 let _ = request.response_tx.send(result);
             }
         })
@@ -68,9 +68,10 @@ impl DcapWorker {
         let (response_tx, response_rx) = oneshot::channel();
         let request = DcapRequest { url, response_tx };
 
-        self.tx.send(request).await.map_err(|_| {
-            AppError::EnclaveResponse("DCAP worker thread died".to_string())
-        })?;
+        self.tx
+            .send(request)
+            .await
+            .map_err(|_| AppError::EnclaveResponse("DCAP worker thread died".to_string()))?;
 
         let result = time::timeout(Duration::from_secs(30), response_rx)
             .await
