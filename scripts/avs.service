@@ -55,13 +55,15 @@ ExecStart=/usr/bin/docker run --rm --name avs \
     -e AVS_EXPECTED_MRENCLAVE=${AVS_EXPECTED_MRENCLAVE} \
     -e AVS_ALLOW_DEBUG_ENCLAVE=${AVS_ALLOW_DEBUG_ENCLAVE:-0} \
     -e AVS_ALLOW_OUTDATED_TCB=${AVS_ALLOW_OUTDATED_TCB:-0} \
+    -e AVS_ISV_PROD_ID=${AVS_ISV_PROD_ID:-0} \
+    -e AVS_MIN_ISV_SVN=${AVS_MIN_ISV_SVN:-0} \
     -e RUST_LOG=${RUST_LOG:-info} \
     ghcr.io/relational-network/attestation-verification-service:staging-latest
 
 ExecStop=/usr/bin/docker stop avs
 
-# Health check - verify AVS is responding
-ExecStartPost=/bin/bash -c 'for i in {1..30}; do sleep 1; curl -sf http://127.0.0.1:9100/health && exit 0; done; echo "AVS health check failed after 30s" && exit 1'
+# Health check - verify AVS is responding (increased timeout for first start)
+ExecStartPost=/bin/bash -c 'for i in {1..60}; do sleep 1; curl -sf http://127.0.0.1:9100/health && exit 0; done; echo "AVS health check failed after 60s" && exit 1'
 
 [Install]
 WantedBy=multi-user.target
