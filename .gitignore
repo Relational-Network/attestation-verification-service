@@ -2,3 +2,4 @@
 /.env
 /avs-signing-key.pem
 .env.docker
+avs-binary
