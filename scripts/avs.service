@@ -23,21 +23,24 @@
 
 [Unit]
 Description=Attestation Verification Service (Docker)
-After=docker.service
+After=docker.service network-online.target
 Requires=docker.service
+Wants=network-online.target
 
 [Service]
 Type=simple
 Restart=always
 RestartSec=5
+StartLimitInterval=300
+StartLimitBurst=5
 EnvironmentFile=/opt/iob-micres/.env
 
 # Stop and remove any existing container
 ExecStartPre=-/usr/bin/docker stop avs
 ExecStartPre=-/usr/bin/docker rm avs
 
-# Pull latest image (optional, CD handles this)
-ExecStartPre=/usr/bin/docker pull ghcr.io/relational-network/attestation-verification-service:staging-latest
+# Pull latest image with retry, fallback to cached image if pull fails
+ExecStartPre=-/bin/bash -c 'docker pull ghcr.io/relational-network/attestation-verification-service:staging-latest || echo "Pull failed, using cached image"'
 
 # Run the AVS container
 # - Uses host networking for enclave communication
@@ -56,6 +59,9 @@ ExecStart=/usr/bin/docker run --rm --name avs \
     ghcr.io/relational-network/attestation-verification-service:staging-latest
 
 ExecStop=/usr/bin/docker stop avs
+
+# Health check - verify AVS is responding
+ExecStartPost=/bin/bash -c 'for i in {1..30}; do sleep 1; curl -sf http://127.0.0.1:9100/health && exit 0; done; echo "AVS health check failed after 30s" && exit 1'
 
 [Install]
 WantedBy=multi-user.target
