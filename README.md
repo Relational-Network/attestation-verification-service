@@ -332,12 +332,12 @@ RUST_LOG=info  # or trace, debug, warn, error
 
 ```bash
 # Generate signing key (first time only)
-cd secrets && ./generate-keys.sh
+./secrets/generate-keys.sh
+
+# Load local env (paths assume repo root)
+source .env
 
 # Run service (HTTP mode)
-export AVS_SIGNING_KEY_PATH=./secrets/avs-signing-key.pem
-export AVS_EXPECTED_MRSIGNER=<hex>
-export AVS_ALLOW_DEBUG_ENCLAVE=1  # for development only
 CC=clang CXX=clang++ cargo run --release
 ```
 
@@ -367,19 +367,20 @@ curl -sk https://127.0.0.1:9100/health
 > requires this specific version for Azure DCsv3 SGX VMs.
 
 ```bash
-# Build
-docker build -t avs .
+# Build native binary (required)
+CC=clang CXX=clang++ cargo build --release
+cp target/release/attestation-verification-service avs-binary
+
+# Build Docker image (runtime-only, uses prebuilt binary)
+docker build -t avs-clean .
 
 # Run (HTTP mode, host network for localhost enclave access)
-docker run -d \
+docker run -d --rm \
   --name avs \
   --network host \
   -v ./secrets:/secrets:ro \
-  -e AVS_SIGNING_KEY_PATH=/secrets/avs-signing-key.pem \
-  -e AVS_EXPECTED_MRSIGNER=<hex> \
-  -e AVS_ALLOW_DEBUG_ENCLAVE=1 \
-  -e AVS_ALLOW_OUTDATED_TCB=1 \
-  avs
+  --env-file .env.docker \
+  avs-clean
 ```
 
 ### Docker (HTTPS)
@@ -388,7 +389,7 @@ docker run -d \
 # Generate TLS certificate first (see above)
 
 # Run (HTTPS mode)
-docker run -d \
+docker run -d --rm \
   --name avs \
   --network host \
   -v ./secrets:/secrets:ro \
@@ -398,11 +399,41 @@ docker run -d \
   -e AVS_EXPECTED_MRSIGNER=<hex> \
   -e AVS_ALLOW_DEBUG_ENCLAVE=1 \
   -e AVS_ALLOW_OUTDATED_TCB=1 \
-  avs
+  avs-clean
 
 # Test
 curl -sk https://127.0.0.1:9100/health
 ```
+
+### Local Dev (Docker: AVS + relational-sdk)
+
+```bash
+# 1. Build AVS binary + image (required)
+CC=clang CXX=clang++ cargo build --release
+cp target/release/attestation-verification-service avs-binary
+docker build -t avs-clean .
+
+# 2. Start AVS (HTTP, host network)
+docker run -d --rm --name avs --network host \
+  -v $(pwd)/secrets:/secrets:ro \
+  --env-file .env.docker \
+  avs-clean
+
+# 3. Start relational-sdk (host network so it can reach 127.0.0.1:9100)
+docker run --rm -d --name relational-sdk-sgx --network host \
+  --device /dev/sgx/enclave --device /dev/sgx/provision \
+  -v "$HOME/.config/gramine/enclave-key.pem:/keys/enclave-key.pem:ro" \
+  -e GRAMINE_SGX_SIGNING_KEY=/keys/enclave-key.pem \
+  -e AVS_JWKS_URL=http://127.0.0.1:9100/.well-known/jwks.json \
+  relationalnetwork/relational-sdk:focal
+
+# 4. Verify AVS reachability from inside the SDK container
+docker exec relational-sdk-sgx curl -s http://127.0.0.1:9100/.well-known/jwks.json | jq
+```
+
+Notes:
+- If `CLERK_JWKS_URL` is set in `.env.docker`, `/v1/attest` requires a valid Clerk JWT.
+- If you enable HTTPS for AVS, set `AVS_JWKS_URL` to `https://127.0.0.1:9100/.well-known/jwks.json`.
 
 ### Quick E2E Test (HTTPS)
 
@@ -415,7 +446,12 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
   -keyout secrets/avs-tls.key -out secrets/avs-tls.crt -days 365 \
   -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 
-# 2. Start AVS container (HTTPS)
+# 2. Build native binary + image
+CC=clang CXX=clang++ cargo build --release
+cp target/release/attestation-verification-service avs-binary
+docker build -t avs-clean .
+
+# 3. Start AVS container (HTTPS)
 docker run --rm -d --name avs --network host \
   -v $(pwd)/secrets:/secrets:ro \
   -e AVS_SIGNING_KEY_PATH=/secrets/avs-signing-key.pem \
@@ -424,12 +460,12 @@ docker run --rm -d --name avs --network host \
   -e AVS_EXPECTED_MRSIGNER=777d23b75d3974a2a67224e49e78a45f65537861605cc0b86cb92e8d79a8d243 \
   -e AVS_ALLOW_DEBUG_ENCLAVE=1 \
   -e AVS_ALLOW_OUTDATED_TCB=1 \
-  avs
+  avs-clean
 
-# 3. Test health
+# 4. Test health
 curl http://127.0.0.1:9100/health
 
-# 4. Test attestation (requires enclave running on port 8080)
+# 5. Test attestation (requires enclave running on port 8080)
 curl -s -X POST http://127.0.0.1:9100/v1/attest \
   -H 'Content-Type: application/json' \
   -d '{"enclave_url":"https://127.0.0.1:8080"}' | jq
@@ -438,7 +474,7 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
 ### Generate a signing key
 
 ```bash
-openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out avs-signing-key.pem
+./secrets/generate-keys.sh
 ```
 
 ## Related Documentation

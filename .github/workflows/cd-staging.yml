@@ -10,58 +10,58 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  # Force lowercase for Docker compatibility
   IMAGE_NAME: relational-network/attestation-verification-service
 
 jobs:
   build-and-push:
-    name: Build and Push Docker Image
-    runs-on: ubuntu-latest
+    name: Build and Push AVS Image
+    runs-on: ubuntu-20.04
     permissions:
       contents: read
       packages: write
-    outputs:
-      image-tag: ${{ steps.meta.outputs.tags }}
-      image-digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Log in to Container Registry
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y \
+          clang \
+          cmake \
+          pkg-config \
+          libssl-dev
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@1.92.0
+
+      - name: Build AVS binary (native)
+        run: |
+          CC=clang CXX=clang++ cargo build --release
+          cp target/release/attestation-verification-service avs-binary
+
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: relational-network
+          password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,prefix=staging-
-            type=raw,value=staging-latest
-
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@v6
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging-latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging-${{ github.sha }}
 
   deploy:
     name: Deploy to Staging
     runs-on: ubuntu-latest
     needs: build-and-push
     steps:
-      - name: Deploy AVS via SSH
+      - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
@@ -70,23 +70,34 @@ jobs:
           username: ${{ secrets.STAGING_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
           envs: GHCR_TOKEN
+          command_timeout: 15m
           script: |
+            set -e
+
+            echo "=== AVS Deploy ==="
+            echo "Started at: $(date)"
+
             echo "=== Logging into GHCR ==="
             echo "$GHCR_TOKEN" | docker login ghcr.io -u relational-network --password-stdin
-            
-            echo "=== Pulling latest AVS image ==="
+
+            echo "=== Pulling latest image ==="
             docker pull ghcr.io/relational-network/attestation-verification-service:staging-latest
-            
+
             echo "=== Restarting AVS service ==="
             sudo systemctl restart avs
-            
+
             echo "=== Waiting for AVS to start ==="
             sleep 10
-            
+
             echo "=== Checking AVS health ==="
-            curl -sf http://127.0.0.1:9100/health || exit 1
-            
+            curl -sf http://127.0.0.1:9100/health || {
+              echo "Health check failed!"
+              sudo journalctl -u avs -n 50 --no-pager
+              exit 1
+            }
+
             echo "=== AVS deployed successfully ==="
+            echo "Completed at: $(date)"
 
   verify:
     name: Verify Deployment
@@ -99,6 +110,6 @@ jobs:
       - name: Health check via public URL
         run: |
           echo "Checking AVS health via Caddy..."
-          curl -sf https://iob-staging.duckdns.org/.well-known/jwks.json || echo "JWKS endpoint check (may fail if enclave not running)"
+          curl -sf https://iob-staging.duckdns.org/.well-known/jwks.json || echo "JWKS check (may fail if Caddy not configured)"
           echo ""
           echo "AVS deployment complete!"

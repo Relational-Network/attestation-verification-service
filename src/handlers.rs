@@ -20,8 +20,10 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::warn;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{info, warn};
+use tokio::sync::{mpsc, oneshot};
+use tokio::time;
 use url::Url;
 use utoipa::ToSchema;
 
@@ -31,12 +33,65 @@ use crate::error::AppError;
 use crate::jwk::{Jwk, JwkSet};
 use crate::ratls::RaTlsVerifier;
 
+// DCAP verification is blocking and uses FFI; keep it off the async runtime.
+// We run it in a single dedicated worker thread to avoid DCAP thread-local
+// teardown issues observed in Docker.
+
+struct DcapRequest {
+    url: Url,
+    response_tx: oneshot::Sender<Result<Jwk, String>>,
+}
+
+pub struct DcapWorker {
+    tx: mpsc::Sender<DcapRequest>,
+}
+
+pub fn start_dcap_worker(ratls: RaTlsVerifier) -> DcapWorker {
+    let (tx, mut rx) = mpsc::channel::<DcapRequest>(16);
+
+    std::thread::Builder::new()
+        .name("dcap-worker".to_string())
+        .spawn(move || {
+            while let Some(request) = rx.blocking_recv() {
+                let result = fetch_enclave_public_key_sync(request.url, &ratls)
+                    .map_err(|e| e.to_string());
+                let _ = request.response_tx.send(result);
+            }
+        })
+        .expect("Failed to spawn DCAP worker thread");
+
+    DcapWorker { tx }
+}
+
+impl DcapWorker {
+    pub async fn verify(&self, url: Url) -> Result<Jwk, AppError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = DcapRequest { url, response_tx };
+
+        self.tx.send(request).await.map_err(|_| {
+            AppError::EnclaveResponse("DCAP worker thread died".to_string())
+        })?;
+
+        let result = time::timeout(Duration::from_secs(30), response_rx)
+            .await
+            .map_err(|_| AppError::EnclaveResponse("DCAP verification timeout".to_string()))?;
+
+        match result {
+            Ok(Ok(jwk)) => Ok(jwk),
+            Ok(Err(err)) => Err(AppError::EnclaveResponse(err)),
+            Err(_) => Err(AppError::EnclaveResponse(
+                "DCAP worker dropped response".to_string(),
+            )),
+        }
+    }
+}
+
 /// Shared application state for request handlers.
 pub struct AppState {
     pub config: Config,
     pub encoding_key: EncodingKey,
     pub public_jwk: Jwk,
-    pub ratls: Arc<std::sync::Mutex<RaTlsVerifier>>,
+    pub dcap_worker: DcapWorker,
 }
 
 /// Request payload for /attest.
@@ -213,10 +268,7 @@ pub async fn attest(
     url.set_path("/v1/attestation/public-key");
     url.set_query(None);
 
-    // RA-TLS handshake to the enclave and fetch its public encryption key.
-    let ratls = state.ratls.clone();
-    let enclave_public_key =
-        tokio::task::spawn_blocking(move || fetch_enclave_public_key(url, ratls)).await??;
+    let enclave_public_key = state.dcap_worker.verify(url.clone()).await?;
 
     // Create signed JWT with a short lifetime.
     let now = SystemTime::now()
@@ -248,16 +300,18 @@ pub async fn attest(
     header.kid = Some(state.config.signing_key_id.clone());
 
     let token = encode(&header, &claims, &state.encoding_key)?;
+    info!(user_id = %claims.sub, role = %claims.role, "Attestation request completed");
 
-    // Return response with Cache-Control: no-store to prevent token caching
-    Ok((
+    // Return response with Cache-Control: no-store to prevent token caching.
+    let response = (
         [(header::CACHE_CONTROL, "no-store")],
         Json(AttestResponse {
             token,
             enclave_public_key,
             expires_at: exp,
         }),
-    ))
+    );
+    Ok(response)
 }
 
 /// Allowlist helper: match exact host or host:port.
@@ -277,11 +331,8 @@ fn is_host_allowed(host: &str, port: Option<u16>, allowlist: &[String]) -> bool 
     })
 }
 
-/// Fetch the enclave's public encryption key over RA-TLS.
-fn fetch_enclave_public_key(
-    url: Url,
-    ratls: Arc<std::sync::Mutex<RaTlsVerifier>>,
-) -> Result<Jwk, AppError> {
+/// Fetch the enclave's public encryption key over RA-TLS (runs in DCAP worker).
+fn fetch_enclave_public_key_sync(url: Url, ratls: &RaTlsVerifier) -> Result<Jwk, AppError> {
     let host = url
         .host_str()
         .ok_or_else(|| AppError::EnclaveResponse("enclave_url host missing".to_string()))?
@@ -350,17 +401,10 @@ fn fetch_enclave_public_key(
 
     // Now verify the certificate using RA-TLS (DCAP quote verification)
     // This happens OUTSIDE the OpenSSL handshake context
-    let guard = ratls.lock().map_err(|e| {
-        AppError::EnclaveResponse(format!("Failed to acquire RA-TLS verifier lock: {e}"))
-    })?;
-
-    guard.verify_der(&cert_der).map_err(|err| {
+    ratls.verify_der(&cert_der).map_err(|err| {
         warn!(error = %err, "RA-TLS verification failed");
         AppError::EnclaveResponse(format!("RA-TLS attestation failed: {err}"))
     })?;
-
-    tracing::info!("RA-TLS verification succeeded - SGX quote is valid");
-    drop(guard);
 
     // Minimal HTTP/1.1 request to avoid extra client dependencies.
     let request = format!(

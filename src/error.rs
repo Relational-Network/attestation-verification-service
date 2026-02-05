@@ -11,7 +11,6 @@ use axum::{
     Json,
 };
 use thiserror::Error;
-use tokio::task::JoinError;
 
 /// Errors mapped to HTTP responses and logs.
 #[derive(Debug, Error)]
@@ -32,8 +31,6 @@ pub enum AppError {
     Json(#[from] serde_json::Error),
     #[error("JWT error: {0}")]
     Jwt(#[from] jsonwebtoken::errors::Error),
-    #[error("join error: {0}")]
-    Join(#[from] JoinError),
     #[error("attestation failed: {0}")]
     Attestation(String),
     #[error("enclave response error: {0}")]

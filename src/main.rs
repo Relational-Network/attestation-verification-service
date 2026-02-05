@@ -59,7 +59,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use config::Config;
 use error::AppError;
 use handlers::{
-    attest, health, jwks, AppState, AttestRequest, AttestResponse, AttestationClaims, PolicyClaims,
+    attest, health, jwks, start_dcap_worker, AppState, AttestRequest, AttestResponse, AttestationClaims, PolicyClaims,
 };
 use jwk::{jwk_for_public_key, Jwk, JwkSet};
 use ratls::RaTlsVerifier;
@@ -123,6 +123,12 @@ async fn run() -> Result<(), AppError> {
     config.apply_ratls_env();
 
     // Load AVS signing key and expose public JWK to clients.
+    if !config.signing_key_path.exists() {
+        return Err(AppError::Config(format!(
+            "signing key not found at {} (run ./secrets/generate-keys.sh)",
+            config.signing_key_path.display()
+        )));
+    }
     let signing_key_pem = fs::read(&config.signing_key_path)?;
     let encoding_key = EncodingKey::from_ec_pem(&signing_key_pem)?;
     let secret_key = SecretKey::from_pkcs8_pem(
@@ -133,17 +139,15 @@ async fn run() -> Result<(), AppError> {
     // Override the kid with the configured signing_key_id so it matches JWT headers
     public_jwk.kid = config.signing_key_id.clone();
 
-    // RA-TLS verifier is not thread-safe; guard with a mutex.
-    let ratls = Arc::new(std::sync::Mutex::new(RaTlsVerifier::new(
-        &config.ratls_verify_lib,
-    )?));
+    // Start the DCAP worker thread for RA-TLS verification.
+    let dcap_worker = start_dcap_worker(RaTlsVerifier::new(&config.ratls_verify_lib)?);
 
     // Shared state for HTTP handlers.
     let state = Arc::new(AppState {
         config: config.clone(),
         encoding_key,
         public_jwk,
-        ratls,
+        dcap_worker,
     });
 
     // HTTP routing + Swagger UI for docs.

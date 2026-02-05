@@ -1,55 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Relational Network
 
-# Multi-stage build for AVS (Attestation Verification Service)
-# Uses Ubuntu 20.04 for compatibility with az-dcap-client
+# Runtime-only Dockerfile for AVS (Attestation Verification Service)
+#
+# IMPORTANT: This uses a PRE-BUILT binary from the host machine.
+# The binary must be built natively before building this image:
+#
+#   CC=clang CXX=clang++ cargo build --release
+#   cp target/release/attestation-verification-service avs-binary
+#   docker build -t avs .
+#
+# WHY PRE-BUILT?
+# The Docker-built binary crashes (SIGSEGV) when calling DCAP verification
+# due to incompatibilities between the Docker build environment and the
+# DCAP/Gramine libraries. Native-built binaries work perfectly in Docker.
+# This was extensively debugged and confirmed: the issue is build-time,
+# not runtime.
 
-# === Build Stage ===
-FROM ubuntu:20.04 AS builder
+FROM ubuntu:20.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-WORKDIR /build
-
-# Install Rust and build dependencies
-# NOTE: clang is required because aws-lc-rs (crypto library) refuses to compile
-# with GCC 9.4 due to a memcmp bug. See RUSTSEC-2023-0071 for why we use aws-lc-rs.
-RUN apt-get update && apt-get install -y \
-    curl \
-    build-essential \
-    clang \
-    cmake \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set clang as the C/C++ compiler for aws-lc-rs
-ENV CC=clang
-ENV CXX=clang++
-
-# Install Rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Copy manifests first for dependency caching
-COPY Cargo.toml Cargo.lock* ./
-
-# Create dummy src to build dependencies
-RUN mkdir src && \
-    echo 'fn main() { println!("placeholder"); }' > src/main.rs && \
-    cargo build --release && \
-    rm -rf src
-
-# Copy actual source code
-COPY src ./src
-
-# Build the actual binary (touch to invalidate cache)
-RUN touch src/main.rs && cargo build --release
-
-# === Runtime Stage ===
-FROM ubuntu:20.04 AS runtime
-
-# Install runtime dependencies and Gramine RA-TLS DCAP library
+# Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl1.1 \
@@ -82,34 +54,34 @@ RUN apt-get update && apt-get install -y \
     az-dcap-client \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user for security
-RUN useradd -r -s /bin/false -u 1000 avs
+# Create non-root user for security with home directory for az-dcap-client cache
+RUN useradd -r -s /bin/false -u 1000 -m avs
 
 WORKDIR /app
 
-# Copy binary from builder
-COPY --from=builder /build/target/release/attestation-verification-service /app/avs
+# Copy PRE-BUILT binary from host
+# Build with: CC=clang CXX=clang++ cargo build --release
+# Then copy: cp target/release/attestation-verification-service avs-binary
+COPY avs-binary /app/avs
 
 # Create directories for secrets and TLS certs
-RUN mkdir -p /secrets /tls && chown -R avs:avs /app /secrets /tls
+RUN mkdir -p /secrets /tls && chown -R avs:avs /app /secrets /tls /home/avs
+
+# Make binary executable
+RUN chmod +x /app/avs
 
 # Switch to non-root user
 USER avs
 
-# Expose default port (9100 for both HTTP and HTTPS)
+# Expose default port
 EXPOSE 9100
 
-# Health check - supports both HTTP and HTTPS
-# Uses HTTP by default; override CMD if using HTTPS
+# Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -fsk http://localhost:9100/health || curl -fsk https://localhost:9100/health || exit 1
 
-# Environment variables (override at runtime)
+# Environment variables
 ENV AVS_BIND_ADDR=0.0.0.0:9100
 ENV RUST_LOG=info
-# TLS is optional - set these to enable HTTPS:
-# ENV AVS_TLS_CERT_PATH=/tls/avs.crt
-# ENV AVS_TLS_KEY_PATH=/tls/avs.key
 
-# Run the service
 ENTRYPOINT ["/app/avs"]
