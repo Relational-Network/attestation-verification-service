@@ -17,14 +17,14 @@
 # This was extensively debugged and confirmed: the issue is build-time,
 # not runtime.
 
-FROM ubuntu:24.04
+FROM ubuntu:20.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    libssl3 \
+    libssl1.1 \
     curl \
     gnupg \
     && rm -rf /var/lib/apt/lists/*
@@ -32,19 +32,19 @@ RUN apt-get update && apt-get install -y \
 # Add Gramine repository
 RUN curl -fsSLo /usr/share/keyrings/gramine-keyring.gpg \
     https://packages.gramineproject.io/gramine-keyring.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gramine-keyring.gpg] https://packages.gramineproject.io/ noble main" \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gramine-keyring.gpg] https://packages.gramineproject.io/ focal main" \
     > /etc/apt/sources.list.d/gramine.list
 
 # Add Intel SGX repository for DCAP libraries
 RUN curl -fsSLo /usr/share/keyrings/intel-sgx-deb.asc \
     https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-sgx-deb.asc] https://download.01.org/intel-sgx/sgx_repo/ubuntu noble main" \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-sgx-deb.asc] https://download.01.org/intel-sgx/sgx_repo/ubuntu focal main" \
     > /etc/apt/sources.list.d/intel-sgx.list
 
 # Add Microsoft repository for Azure DCAP client
 RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor \
     > /usr/share/keyrings/microsoft-prod.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/24.04/prod noble main" \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/20.04/prod focal main" \
     > /etc/apt/sources.list.d/microsoft-prod.list
 
 # Install Gramine RA-TLS and DCAP libraries (including Azure DCAP client)
