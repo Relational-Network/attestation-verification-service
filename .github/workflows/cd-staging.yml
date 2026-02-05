@@ -22,56 +22,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang cmake pkg-config libssl-dev
-
-      - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@1.92.0
-
-      - name: Build AVS binary (native)
-        run: |
-          CC=clang CXX=clang++ cargo build --release
-          cp target/release/attestation-verification-service avs-binary
-
-      - name: Validate AVS binary
-        run: |
-          echo "=== Validating AVS binary ==="
-          
-          # Check binary exists
-          if [ ! -f avs-binary ]; then
-            echo "ERROR: avs-binary not found!"
-            exit 1
-          fi
-          
-          # Check binary size (should be > 1MB for full binary)
-          SIZE=$(stat -c%s avs-binary)
-          echo "Binary size: $SIZE bytes"
-          if [ "$SIZE" -lt 1000000 ]; then
-            echo "ERROR: Binary size too small ($SIZE bytes), likely incomplete!"
-            exit 1
-          fi
-          
-          # Check binary is executable
-          if [ ! -x avs-binary ]; then
-            echo "ERROR: Binary is not executable!"
-            chmod +x avs-binary
-          fi
-          
-          # Verify it's a Linux ELF binary
-          if ! file avs-binary | grep -q "ELF 64-bit"; then
-            echo "ERROR: Not a valid Linux 64-bit ELF binary!"
-            file avs-binary
-            exit 1
-          fi
-          
-          # Smoke test - verify it can display help/version (with short timeout)
-          echo "Running smoke test..."
-          timeout 5s ./avs-binary --help || echo "Note: --help may not be implemented, continuing..."
-          
-          echo "=== Binary validation passed ==="
-
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -90,6 +40,8 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging-latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   deploy:
     name: Deploy to Staging
