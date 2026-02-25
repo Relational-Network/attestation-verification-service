@@ -85,8 +85,94 @@ const { payload } = await jose.jwtVerify(token, jwks, {
 | `AVS_SIGNING_KEY_PATH` | EC P-256 private key in PEM (PKCS8) |
 | `AVS_EXPECTED_MRSIGNER` | Expected MRSIGNER (hex) or `any` |
 | `AVS_EXPECTED_MRENCLAVE` | Expected MRENCLAVE (hex) or `any` |
+| `DEV_DATA_KEY_PATH` | Path to 16-byte `/data` key hex file **(dev only)** |
+
+> **Prod alternative:** Set `AZURE_KEYVAULT_URL` instead of `DEV_DATA_KEY_PATH` (see [Secret Provisioning Server](#secret-provisioning-server)).
 
 Note: At least one of `AVS_EXPECTED_MRSIGNER` or `AVS_EXPECTED_MRENCLAVE` must be set (not `any`).
+
+## Secret Provisioning Server
+
+AVS listens on **port 4433** (in addition to the API port 9100) to provision the
+`/data` encryption key to enclave instances at startup.
+
+This allows `/data` to survive hardware changes or code updates — unlike the
+default Gramine `_sgx_mrsigner` sealed key which is tied to hardware + signing key.
+
+### How it works
+
+```
+Enclave startup (LD_PRELOAD libsecret_prov_attest.so)
+  → connects to AVS:4433 via mutually-attested TLS
+  → presents RA-TLS cert containing SGX DCAP quote
+  → AVS verifies MRENCLAVE/MRSIGNER via RA_TLS_* env vars
+  → AVS sends 16-byte AES-GCM-128 key
+  → Gramine writes key to /dev/attestation/keys/data_key slot
+  → Gramine mounts /data with that key (transparent to app)
+  → main() runs normally
+```
+
+The enclave authenticates itself via its SGX quote — no client TLS certificate
+is required. The same MRENCLAVE/MRSIGNER policy from `AVS_EXPECTED_*` applies.
+
+### Dev setup (one-time)
+
+```bash
+# 1. Generate all secrets (signing key + data key + TLS cert)
+cd secrets && ./generate-keys.sh && cd ..
+
+# 2. Copy AVS TLS cert to the enclave host so Gramine can verify port 4433
+sudo cp secrets/avs-tls.crt /etc/ssl/certs/avs-ca.crt
+# Or from relational-sdk:
+make setup-dev-certs
+```
+
+### Dev key configuration
+
+```bash
+# .env (local) or .env.docker (Docker):
+DEV_DATA_KEY_PATH=./secrets/data-key.hex      # file path (preferred)
+# DEV_DATA_KEY=<32-hex-chars>                 # inline alternative
+```
+
+### Production: Azure Key Vault
+
+```bash
+# Store the key in Azure Key Vault (one-time)
+KEY_HEX=$(cat secrets/data-key.hex)
+az keyvault secret set \
+  --vault-name YOUR_VAULT \
+  --name relational-data-key \
+  --value "$KEY_HEX"
+
+# Grant the AVS VM's managed identity secret read access
+PRINCIPAL=$(az vm show --name avs-vm --resource-group YOUR_RG \
+  --query identity.principalId -o tsv)
+az role assignment create \
+  --role "Key Vault Secrets User" \
+  --assignee "$PRINCIPAL" \
+  --scope "/subscriptions/YOUR_SUB/resourceGroups/YOUR_RG/providers/Microsoft.KeyVault/vaults/YOUR_VAULT"
+```
+
+Then set in the AVS environment (no credentials needed — IMDS handles auth):
+
+```bash
+AZURE_KEYVAULT_URL=https://YOUR_VAULT.vault.azure.net
+AZURE_KEYVAULT_KEY_NAME=relational-data-key   # optional, this is the default
+# Remove DEV_DATA_KEY_PATH entirely in prod
+```
+
+### Secret provisioning env vars
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEV_DATA_KEY_PATH` | — | Path to 16-byte hex key file (dev mode) |
+| `DEV_DATA_KEY` | — | Inline 32-char hex key (dev mode alternative) |
+| `AZURE_KEYVAULT_URL` | — | Key Vault URL — enables prod mode |
+| `AZURE_KEYVAULT_KEY_NAME` | `relational-data-key` | Secret name in Key Vault |
+| `SECRET_PROV_CERT` | `/secrets/avs-tls.crt` | TLS cert path for port 4433 (Docker ENV default) |
+| `SECRET_PROV_KEY` | `/secrets/avs-tls.key` | TLS key path for port 4433 (Docker ENV default) |
+| `SECRET_PROV_VERIFY_LIB` | `/usr/lib/x86_64-linux-gnu/libsecret_prov_verify_dcap.so` | Gramine verifier lib path |
 
 ## Clerk Authentication (Optional)
 
@@ -227,13 +313,31 @@ sudo systemctl status avs
 **Prerequisites on the VM:**
 - Docker installed and running
 - Signing key at `/opt/iob-micres/secrets/avs-signing-key.pem`
+- Data key at `/opt/iob-micres/secrets/data-key.hex`
+- TLS cert at `/opt/iob-micres/secrets/avs-tls.crt` + `avs-tls.key`
 - Environment file at `/opt/iob-micres/.env` with measurements
 
-**Generate signing key (first time only):**
+**Generate all keys (first time only):**
 ```bash
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
   -out /opt/iob-micres/secrets/avs-signing-key.pem
+openssl rand -hex 16 > /opt/iob-micres/secrets/data-key.hex
+chmod 600 /opt/iob-micres/secrets/data-key.hex
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout /opt/iob-micres/secrets/avs-tls.key \
+  -out /opt/iob-micres/secrets/avs-tls.crt \
+  -days 3650 -subj "/CN=avs-secret-prov" \
+  -addext "subjectAltName=IP:127.0.0.1"
+chmod 600 /opt/iob-micres/secrets/avs-tls.key
+# Trust the cert on the enclave host (Gramine reads this path)
+sudo cp /opt/iob-micres/secrets/avs-tls.crt /etc/ssl/certs/avs-ca.crt
+# Restart both services to pick up the new key and cert
+sudo systemctl restart avs enclave
 ```
+
+> **Note:** Staging uses **dev mode** — `DEV_DATA_KEY_PATH` pointing to the hex file above.
+> Azure Key Vault is not needed at this tier. To graduate to prod, add `AZURE_KEYVAULT_URL`
+> to `/opt/iob-micres/.env` and remove `DEV_DATA_KEY_PATH`.
 
 ## Development
 
@@ -265,8 +369,11 @@ CC=clang CXX=clang++ cargo build --release
 ```bash
 cd /path/to/attestation-verification-service
 
-# Generate signing key (first time only)
+# Generate all secrets (first time only)
 cd secrets && ./generate-keys.sh && cd ..
+
+# Copy AVS TLS cert to enclave host (first time only — for secret provisioning)
+sudo cp secrets/avs-tls.crt /etc/ssl/certs/avs-ca.crt
 
 # Build
 CC=clang CXX=clang++ cargo build --release
@@ -282,8 +389,9 @@ RUST_LOG=info \
 **Terminal 2 - Enclave:**
 ```bash
 cd /path/to/relational-sdk
+# Copy AVS cert to system store if not done yet (see Terminal 1 above)
 CC=clang CXX=clang++ make SGX=1 RA_TYPE=dcap SGX_DEBUG=1
-gramine-sgx relational-sdk
+SECRET_PROVISION_SERVERS=localhost:4433 gramine-sgx relational-sdk
 ```
 
 **Terminal 3 - Dashboard:**
@@ -315,6 +423,11 @@ curl -s -X POST http://127.0.0.1:9100/v1/attest \
 ```bash
 # Required
 AVS_SIGNING_KEY_PATH=./secrets/avs-signing-key.pem
+
+# Data encryption key (dev mode — one of these required)
+DEV_DATA_KEY_PATH=./secrets/data-key.hex   # file path (preferred)
+# DEV_DATA_KEY=<32-hex-chars>              # inline alternative
+# AZURE_KEYVAULT_URL=https://...           # prod: use Key Vault instead
 
 # For debug enclaves
 AVS_ALLOW_DEBUG_ENCLAVE=1
@@ -546,6 +659,9 @@ The codebase is organized into logical modules:
 | `handlers.rs` | HTTP request handlers |
 | `jwk.rs` | JWK types and key utilities |
 | `ratls.rs` | RA-TLS verifier FFI wrapper |
+| `key_store.rs` | `/data` key provider (dev file or Azure Key Vault) |
+| `secret_prov.rs` | Secret provisioning server on port 4433 |
+| `clerk_auth.rs` | Clerk JWT extractor (optional auth) |
 
 ## End-to-end verification (manual)
 

@@ -11,6 +11,7 @@ services:
     container_name: avs
     ports:
       - "9100:9100"
+      - "4433:4433"
     environment:
       - AVS_BIND_ADDR=0.0.0.0:9100
       - AVS_SIGNING_KEY_PATH=/secrets/avs-signing-key.pem
@@ -18,6 +19,8 @@ services:
       - AVS_EXPECTED_MRENCLAVE=${AVS_EXPECTED_MRENCLAVE:-}
       - AVS_ALLOW_DEBUG_ENCLAVE=1
       - RUST_LOG=info,attestation_verification_service=debug
+      # Data key — file path preferred; inline hex also supported via DEV_DATA_KEY
+      - DEV_DATA_KEY_PATH=/secrets/data-key.hex
     volumes:
       - ./secrets:/secrets:ro
     healthcheck:
@@ -45,6 +48,7 @@ services:
       - AVS_SIGNING_KEY_PATH=/secrets/avs-signing-key.pem
       - AVS_ALLOW_DEBUG_ENCLAVE=1
       - RUST_LOG=debug
+      - DEV_DATA_KEY_PATH=/secrets/data-key.hex
     volumes:
       - .:/app
       - ./secrets:/secrets:ro

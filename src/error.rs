@@ -21,6 +21,8 @@ pub enum AppError {
     Url(#[from] url::ParseError),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("hex decode error: {0}")]
+    Hex(#[from] hex::FromHexError),
     #[error("OpenSSL error: {0}")]
     OpenSsl(#[from] openssl::error::ErrorStack),
     #[error("PKCS8 error: {0}")]

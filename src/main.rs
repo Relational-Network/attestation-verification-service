@@ -40,7 +40,9 @@ mod config;
 mod error;
 mod handlers;
 mod jwk;
+mod key_store;
 mod ratls;
+mod secret_prov;
 
 use axum::{extract::DefaultBodyLimit, routing::get, routing::post, Router};
 use dotenvy::dotenv;
@@ -58,6 +60,8 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use config::Config;
 use error::AppError;
+use key_store::KeyStore;
+use secret_prov::start_secret_prov_server;
 use handlers::{
     attest, health, jwks, start_dcap_worker, AppState, AttestRequest, AttestResponse,
     AttestationClaims, PolicyClaims,
@@ -139,6 +143,13 @@ async fn run() -> Result<(), AppError> {
     let mut public_jwk = jwk_for_public_key(&secret_key.public_key(), "sig", "ES256");
     // Override the kid with the configured signing_key_id so it matches JWT headers
     public_jwk.kid = config.signing_key_id.clone();
+
+    // Load the /data encryption key and start the secret provisioning server.
+    // The key is fetched once at startup. In dev mode it comes from DEV_DATA_KEY /
+    // DEV_DATA_KEY_PATH; in prod it is fetched from Azure Key Vault via managed identity.
+    let key_store = KeyStore::from_env()?;
+    let data_key = key_store.get_key().await?;
+    start_secret_prov_server(data_key)?;
 
     // Start the DCAP worker thread for RA-TLS verification.
     let dcap_worker = start_dcap_worker(RaTlsVerifier::new(&config.ratls_verify_lib)?);

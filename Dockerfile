@@ -94,8 +94,9 @@ RUN chmod +x /app/avs
 # Switch to non-root user
 USER avs
 
-# Expose default port
+# Expose AVS HTTP port and secret provisioning TLS port
 EXPOSE 9100
+EXPOSE 4433
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
@@ -104,5 +105,8 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 # Environment variables
 ENV AVS_BIND_ADDR=0.0.0.0:9100
 ENV RUST_LOG=info
+# Default cert paths point to the /secrets mount (overridden for native dev via env)
+ENV SECRET_PROV_CERT=/secrets/avs-tls.crt
+ENV SECRET_PROV_KEY=/secrets/avs-tls.key
 
 ENTRYPOINT ["/app/avs"]
