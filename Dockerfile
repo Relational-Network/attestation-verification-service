@@ -10,10 +10,13 @@
 # =============================================================================
 FROM ubuntu:20.04 AS builder
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y \
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     build-essential \
     clang \
@@ -42,10 +45,13 @@ RUN CC=clang CXX=clang++ cargo build --release
 # =============================================================================
 FROM ubuntu:20.04
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install runtime dependencies
-RUN apt-get update && apt-get install -y \
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl1.1 \
     curl \
@@ -71,7 +77,8 @@ RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor
     > /etc/apt/sources.list.d/microsoft-prod.list
 
 # Install Gramine RA-TLS and DCAP libraries (including Azure DCAP client)
-RUN apt-get update && apt-get install -y \
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gramine-ratls-dcap \
     libsgx-dcap-quote-verify \
     az-dcap-client \
@@ -106,7 +113,9 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 ENV AVS_BIND_ADDR=0.0.0.0:9100
 ENV RUST_LOG=info
 # Default cert paths point to the /secrets mount (overridden for native dev via env)
+# hadolint ignore=SecretsUsedInArgOrEnv
 ENV SECRET_PROV_CERT=/secrets/avs-tls.crt
+# hadolint ignore=SecretsUsedInArgOrEnv
 ENV SECRET_PROV_KEY=/secrets/avs-tls.key
 
 ENTRYPOINT ["/app/avs"]

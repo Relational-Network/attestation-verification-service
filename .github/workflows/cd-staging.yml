@@ -48,6 +48,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-and-push
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy service file to staging
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          source: scripts/avs.service
+          target: /tmp/avs-deploy
+
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         env:
@@ -69,6 +80,10 @@ jobs:
 
             echo "=== Pulling latest image ==="
             docker pull ghcr.io/relational-network/attestation-verification-service:staging-latest
+
+            echo "=== Deploying service file ==="
+            sudo cp /tmp/avs-deploy/scripts/avs.service /etc/systemd/system/avs.service
+            sudo systemctl daemon-reload
 
             echo "=== Restarting AVS service ==="
             sudo systemctl restart avs

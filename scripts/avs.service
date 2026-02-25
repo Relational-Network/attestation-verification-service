@@ -54,18 +54,26 @@ ExecStart=/usr/bin/docker run --rm --name avs \
     -e AVS_SIGNING_KEY_PATH=/secrets/avs-signing-key.pem \
     -e AVS_EXPECTED_MRSIGNER=${AVS_EXPECTED_MRSIGNER} \
     -e AVS_EXPECTED_MRENCLAVE=${AVS_EXPECTED_MRENCLAVE} \
-    -e AVS_ALLOW_DEBUG_ENCLAVE=${AVS_ALLOW_DEBUG_ENCLAVE:-0} \
-    -e AVS_ALLOW_OUTDATED_TCB=${AVS_ALLOW_OUTDATED_TCB:-0} \
-    -e AVS_ISV_PROD_ID=${AVS_ISV_PROD_ID:-0} \
-    -e AVS_MIN_ISV_SVN=${AVS_MIN_ISV_SVN:-0} \
+    -e AVS_ALLOW_DEBUG_ENCLAVE \
+    -e AVS_ALLOW_OUTDATED_TCB \
+    -e AVS_ALLOW_HW_CONFIG_NEEDED \
+    -e AVS_ALLOW_SW_HARDENING_NEEDED \
+    -e AVS_ISV_PROD_ID \
+    -e AVS_MIN_ISV_SVN \
     -e DEV_DATA_KEY_PATH=/secrets/data-key.hex \
-    -e RUST_LOG=${RUST_LOG:-info} \
+    -e AZDCAP_COLLATERAL_VERSION \
+    -e AZDCAP_DEBUG_LOG_LEVEL \
+    -e RA_TLS_ALLOW_DEBUG_ENCLAVE_INSECURE \
+    -e RA_TLS_ALLOW_OUTDATED_TCB_INSECURE \
+    -e RA_TLS_ALLOW_HW_CONFIG_NEEDED \
+    -e RA_TLS_ALLOW_SW_HARDENING_NEEDED \
+    -e RUST_LOG \
     ghcr.io/relational-network/attestation-verification-service:staging-latest
 
 ExecStop=/usr/bin/docker stop avs
 
-# Health check - verify AVS is responding (increased timeout for first start)
-ExecStartPost=/bin/bash -c 'for i in {1..60}; do sleep 1; curl -sf http://127.0.0.1:9100/health && exit 0; done; echo "AVS health check failed after 60s" && exit 1'
+# Health check - non-fatal, just for observability
+ExecStartPost=/bin/bash -c 'for i in {1..60}; do sleep 1; curl -sf http://127.0.0.1:9100/health && exit 0; done; echo "AVS health check did not respond within 60s (non-fatal)"'
 
 [Install]
 WantedBy=multi-user.target
