@@ -81,12 +81,10 @@ type SecretProvisionStartServerFn = unsafe extern "C" fn(
 ///
 /// `key`: exactly 16 bytes — the AES-GCM-128 encryption key for `/data`.
 pub fn start_secret_prov_server(key: [u8; 16]) -> Result<(), AppError> {
-    let lib_path = std::env::var("SECRET_PROV_VERIFY_LIB")
-        .unwrap_or_else(|_| DEFAULT_LIB.to_string());
-    let cert_path = std::env::var("SECRET_PROV_CERT")
-        .unwrap_or_else(|_| DEFAULT_CERT.to_string());
-    let key_path = std::env::var("SECRET_PROV_KEY")
-        .unwrap_or_else(|_| DEFAULT_KEY.to_string());
+    let lib_path =
+        std::env::var("SECRET_PROV_VERIFY_LIB").unwrap_or_else(|_| DEFAULT_LIB.to_string());
+    let cert_path = std::env::var("SECRET_PROV_CERT").unwrap_or_else(|_| DEFAULT_CERT.to_string());
+    let key_path = std::env::var("SECRET_PROV_KEY").unwrap_or_else(|_| DEFAULT_KEY.to_string());
 
     // Validate cert and key files exist before spawning the thread.
     if !std::path::Path::new(&cert_path).exists() {
@@ -124,12 +122,10 @@ pub fn start_secret_prov_server(key: [u8; 16]) -> Result<(), AppError> {
 
     // Build C strings before moving into the thread.
     let c_port = CString::new(SECRET_PROV_PORT).expect("port is valid C string");
-    let c_cert = CString::new(cert_path).map_err(|e| {
-        AppError::Config(format!("cert path contains null byte: {e}"))
-    })?;
-    let c_key = CString::new(key_path).map_err(|e| {
-        AppError::Config(format!("key path contains null byte: {e}"))
-    })?;
+    let c_cert = CString::new(cert_path)
+        .map_err(|e| AppError::Config(format!("cert path contains null byte: {e}")))?;
+    let c_key = CString::new(key_path)
+        .map_err(|e| AppError::Config(format!("key path contains null byte: {e}")))?;
 
     tracing::info!(
         port = SECRET_PROV_PORT,

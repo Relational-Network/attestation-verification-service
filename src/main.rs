@@ -60,14 +60,14 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use config::Config;
 use error::AppError;
-use key_store::KeyStore;
-use secret_prov::start_secret_prov_server;
 use handlers::{
     attest, health, jwks, start_dcap_worker, AppState, AttestRequest, AttestResponse,
     AttestationClaims, PolicyClaims,
 };
 use jwk::{jwk_for_public_key, Jwk, JwkSet};
+use key_store::KeyStore;
 use ratls::RaTlsVerifier;
+use secret_prov::start_secret_prov_server;
 
 // ============================================================================
 // OpenAPI Documentation

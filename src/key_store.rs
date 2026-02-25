@@ -97,15 +97,19 @@ impl KeyStore {
                 .unwrap_or_else(|_| DEFAULT_KEY_NAME.to_string());
             tracing::info!(%vault_url, %key_name, "KeyStore: Azure Key Vault mode");
             return Ok(Self {
-                mode: KeyStoreMode::AzureKeyVault { vault_url, key_name },
+                mode: KeyStoreMode::AzureKeyVault {
+                    vault_url,
+                    key_name,
+                },
             });
         }
 
         // Dev mode — try file first, then inline env var.
         let hex = if let Ok(path) = std::env::var("DEV_DATA_KEY_PATH") {
             tracing::info!(%path, "KeyStore: dev mode — loading key from file");
-            std::fs::read_to_string(&path)
-                .map_err(|e| AppError::Config(format!("failed to read DEV_DATA_KEY_PATH {path}: {e}")))?
+            std::fs::read_to_string(&path).map_err(|e| {
+                AppError::Config(format!("failed to read DEV_DATA_KEY_PATH {path}: {e}"))
+            })?
         } else {
             std::env::var("DEV_DATA_KEY").map_err(|_| {
                 AppError::Config(
@@ -118,16 +122,19 @@ impl KeyStore {
 
         let key = parse_hex_key(hex.trim())?;
         tracing::warn!("KeyStore: DEV mode — using local plaintext key; never use in production");
-        Ok(Self { mode: KeyStoreMode::Dev(key) })
+        Ok(Self {
+            mode: KeyStoreMode::Dev(key),
+        })
     }
 
     /// Fetch the 16-byte encryption key.
     pub async fn get_key(&self) -> Result<[u8; 16], AppError> {
         match &self.mode {
             KeyStoreMode::Dev(key) => Ok(*key),
-            KeyStoreMode::AzureKeyVault { vault_url, key_name } => {
-                fetch_from_azure_kv(vault_url, key_name).await
-            }
+            KeyStoreMode::AzureKeyVault {
+                vault_url,
+                key_name,
+            } => fetch_from_azure_kv(vault_url, key_name).await,
         }
     }
 }
@@ -224,9 +231,7 @@ async fn acquire_imds_token(resource: &str) -> Result<String, AppError> {
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(AppError::Config(format!(
-            "IMDS returned {status}: {body}"
-        )));
+        return Err(AppError::Config(format!("IMDS returned {status}: {body}")));
     }
 
     let body: serde_json::Value = response
