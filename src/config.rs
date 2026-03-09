@@ -128,13 +128,22 @@ impl Config {
             .map(|value| value == "1")
             .unwrap_or(false);
 
-        let allowed_enclave_hosts = env::var("AVS_ALLOWED_ENCLAVE_HOSTS")
+        let allowed_enclave_hosts: Vec<String> = env::var("AVS_ALLOWED_ENCLAVE_HOSTS")
             .unwrap_or_default()
             .split(',')
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| value.to_string())
-            .collect::<Vec<_>>();
+            .collect();
+
+        // Default to localhost-only when no allowlist is configured.
+        // Prevents SSRF by restricting which enclaves the AVS will connect to.
+        // Set AVS_ALLOWED_ENCLAVE_HOSTS explicitly for non-local enclaves.
+        let allowed_enclave_hosts = if allowed_enclave_hosts.is_empty() {
+            vec!["localhost".to_string(), "127.0.0.1".to_string()]
+        } else {
+            allowed_enclave_hosts
+        };
 
         let clerk_jwks_url = env::var("CLERK_JWKS_URL").ok();
 
