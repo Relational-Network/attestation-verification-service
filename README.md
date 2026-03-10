@@ -480,11 +480,7 @@ curl -sk https://127.0.0.1:9100/health
 > requires this specific version for Azure DCsv3 SGX VMs.
 
 ```bash
-# Build native binary (required)
-CC=clang CXX=clang++ cargo build --release
-cp target/release/attestation-verification-service avs-binary
-
-# Build Docker image (runtime-only, uses prebuilt binary)
+# Build Docker image (multi-stage: compiles binary inside Docker)
 docker build -t avs-clean .
 
 # Run (HTTP mode, host network for localhost enclave access)
@@ -521,9 +517,7 @@ curl -sk https://127.0.0.1:9100/health
 ### Local Dev (Docker: AVS + relational-sdk)
 
 ```bash
-# 1. Build AVS binary + image (required)
-CC=clang CXX=clang++ cargo build --release
-cp target/release/attestation-verification-service avs-binary
+# 1. Build AVS Docker image (multi-stage: compiles binary inside Docker)
 docker build -t avs-clean .
 
 # 2. Start AVS (HTTP, host network)
@@ -559,9 +553,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
   -keyout secrets/avs-tls.key -out secrets/avs-tls.crt -days 365 \
   -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 
-# 2. Build native binary + image
-CC=clang CXX=clang++ cargo build --release
-cp target/release/attestation-verification-service avs-binary
+# 2. Build Docker image (multi-stage: compiles binary inside Docker)
 docker build -t avs-clean .
 
 # 3. Start AVS container (HTTPS)

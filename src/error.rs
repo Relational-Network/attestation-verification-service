@@ -42,15 +42,38 @@ pub enum AppError {
 }
 
 impl IntoResponse for AppError {
-    /// Convert internal errors into JSON responses with useful status codes.
+    /// Convert internal errors into sanitized JSON responses.
+    ///
+    /// Internal error details are logged server-side only. Clients receive generic
+    /// messages that do not leak implementation details (file paths, library versions,
+    /// OpenSSL internals, etc.).
     fn into_response(self) -> Response {
+        // Always log the full error with details for server-side debugging.
+        tracing::error!(error = %self, "Request failed");
+
         let (status, message) = match &self {
-            AppError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            AppError::Url(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            AppError::Attestation(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            AppError::EnclaveResponse(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            AppError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            // Client errors — safe to surface the message
+            AppError::Url(_) => (StatusCode::BAD_REQUEST, "Invalid enclave URL".to_string()),
+            AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
+            AppError::Attestation(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
+            AppError::EnclaveResponse(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
+            // Server errors — return generic message; details are in the log
+            AppError::Config(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal configuration error".to_string(),
+            ),
+            AppError::Json(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal serialization error".to_string(),
+            ),
+            AppError::Jwt(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Token signing error".to_string(),
+            ),
+            _ => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            ),
         };
 
         let body = Json(serde_json::json!({ "error": message }));
