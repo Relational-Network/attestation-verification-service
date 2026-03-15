@@ -219,9 +219,19 @@ pub async fn attest(
     // Extract user info from Clerk auth (if available)
     let (user_id, role) = match clerk_auth.0 {
         Some(user) => {
-            // User authenticated via Clerk - use their ID
-            // Role is "user" by default; admin role should be verified by dashboard
-            (user.user_id, user.role)
+            // User authenticated via Clerk - use their verified ID.
+            // If the Clerk JWT includes publicMetadata.role, use it;
+            // otherwise fall back to the role from the request body
+            // (trusted because the Clerk JWT was already verified and
+            // the request comes from an authenticated server-side context).
+            let role = if user.role == "user" {
+                // "user" is the default when publicMetadata has no role.
+                // Prefer explicitly-supplied request body role if present.
+                request.role.unwrap_or(user.role)
+            } else {
+                user.role
+            };
+            (user.user_id, role)
         }
         None => {
             // No Clerk auth - check if CLERK_JWKS_URL is configured
