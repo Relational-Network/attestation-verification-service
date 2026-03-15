@@ -20,6 +20,7 @@
 #       AVS_EXPECTED_MRENCLAVE=<hex>
 #       AVS_ALLOW_DEBUG_ENCLAVE=1  (for debug enclaves)
 #       AVS_ALLOW_OUTDATED_TCB=1   (for outdated TCB)
+#       CLERK_JWKS_URL=<clerk jwks url>  (enables Clerk auth + role extraction)
 
 [Unit]
 Description=Attestation Verification Service (Docker)
@@ -60,6 +61,7 @@ ExecStart=/usr/bin/docker run --rm --name avs \
     -e AVS_ALLOW_SW_HARDENING_NEEDED \
     -e AVS_ISV_PROD_ID \
     -e AVS_MIN_ISV_SVN \
+    -e CLERK_JWKS_URL \
     -e DEV_DATA_KEY_PATH=/secrets/data-key.hex \
     -e AZDCAP_COLLATERAL_VERSION \
     -e AZDCAP_DEBUG_LOG_LEVEL \

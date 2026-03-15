@@ -78,9 +78,13 @@ impl Config {
             .parse()
             .map_err(|err| format!("invalid AVS_BIND_ADDR: {err}"))?;
 
-        let issuer = env::var("AVS_ISSUER").unwrap_or_else(|_| DEFAULT_ISSUER.to_string());
+        let issuer = env::var("AVS_ISSUER")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| DEFAULT_ISSUER.to_string());
         let token_ttl_secs = env::var("AVS_TOKEN_TTL_SECS")
             .ok()
+            .filter(|v| !v.is_empty())
             .and_then(|value| value.parse().ok())
             .unwrap_or(DEFAULT_TTL_SECS);
 
@@ -88,8 +92,10 @@ impl Config {
             .map(PathBuf::from)
             .map_err(|_| "AVS_SIGNING_KEY_PATH is required".to_string())?;
 
-        let signing_key_id =
-            env::var("AVS_SIGNING_KEY_ID").unwrap_or_else(|_| "avs-signing-key-1".to_string());
+        let signing_key_id = env::var("AVS_SIGNING_KEY_ID")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "avs-signing-key-1".to_string());
 
         let tls_cert_path = env::var("AVS_TLS_CERT_PATH").ok().map(PathBuf::from);
         let tls_key_path = env::var("AVS_TLS_KEY_PATH").ok().map(PathBuf::from);
@@ -145,7 +151,7 @@ impl Config {
             allowed_enclave_hosts
         };
 
-        let clerk_jwks_url = env::var("CLERK_JWKS_URL").ok();
+        let clerk_jwks_url = env::var("CLERK_JWKS_URL").ok().filter(|v| !v.is_empty());
 
         Ok(Self {
             bind_addr,
