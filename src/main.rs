@@ -120,8 +120,12 @@ async fn main() {
 
 /// Service bootstrap: config, signing key, verifier, router, and listener.
 async fn run() -> Result<(), AppError> {
-    // Load local .env for developer convenience.
-    dotenv().ok();
+    // Load local .env for developer convenience. In production set
+    // `AVS_DISABLE_DOTENV=1` so a stray `.env` in the container working dir
+    // can't override security-critical vars (measurements, debug flags).
+    if std::env::var("AVS_DISABLE_DOTENV").as_deref() != Ok("1") {
+        dotenv().ok();
+    }
 
     // Load runtime config and configure RA-TLS verifier policy.
     let config = Config::from_env().map_err(AppError::Config)?;
@@ -186,11 +190,43 @@ async fn run() -> Result<(), AppError> {
     } else {
         info!(addr = %config.bind_addr, "AVS listening (HTTP)");
         axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
             .await
             .map_err(|err| AppError::Config(format!("server error: {err}")))?;
     }
 
     Ok(())
+}
+
+/// Wait for SIGINT (Ctrl-C) or SIGTERM so the container exits cleanly.
+///
+/// Without this the HTTP server hangs on `axum::serve(...)` until Docker
+/// force-kills the container after `--stop-timeout`, returning exit 137.
+/// With it the server returns on the first signal and the process exits 0.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install SIGINT handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    info!("Shutdown signal received, stopping AVS");
 }
 
 /// Load TLS configuration from certificate and key files.
