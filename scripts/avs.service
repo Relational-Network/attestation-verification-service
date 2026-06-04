@@ -18,9 +18,13 @@
 #   - Environment file at /opt/iob-micres/.env with:
 #       AVS_EXPECTED_MRSIGNER=<hex>
 #       AVS_EXPECTED_MRENCLAVE=<hex>
-#       AVS_ALLOW_DEBUG_ENCLAVE=1  (for debug enclaves)
-#       AVS_ALLOW_OUTDATED_TCB=1   (for outdated TCB)
-#       CLERK_JWKS_URL=<clerk jwks url>  (enables Clerk auth + role extraction)
+#       AVS_EXPECTED_ISV_PROD_ID=0  (required; numeric, not "any")
+#       AVS_EXPECTED_ISV_SVN=0      (required; numeric, not "any")
+#       AVS_ALLOW_DEBUG_ENCLAVE=1   (for debug enclaves)
+#       AVS_ALLOW_OUTDATED_TCB=1    (for outdated TCB)
+#       CLERK_JWKS_URL=<clerk jwks url>     (enables Clerk auth + role extraction)
+#       CLERK_EXPECTED_ISS=<clerk issuer>   (required when CLERK_JWKS_URL is set)
+#       CLERK_EXPECTED_AUD=iob-avs          (Clerk JWT template audience)
 
 [Unit]
 Description=Attestation Verification Service (Docker)
@@ -59,9 +63,11 @@ ExecStart=/usr/bin/docker run --rm --name avs \
     -e AVS_ALLOW_OUTDATED_TCB \
     -e AVS_ALLOW_HW_CONFIG_NEEDED \
     -e AVS_ALLOW_SW_HARDENING_NEEDED \
-    -e AVS_ISV_PROD_ID \
-    -e AVS_MIN_ISV_SVN \
+    -e AVS_EXPECTED_ISV_PROD_ID \
+    -e AVS_EXPECTED_ISV_SVN \
     -e CLERK_JWKS_URL \
+    -e CLERK_EXPECTED_ISS \
+    -e CLERK_EXPECTED_AUD \
     -e DEV_DATA_KEY_PATH=/secrets/data-key.hex \
     -e AZDCAP_COLLATERAL_VERSION \
     -e AZDCAP_DEBUG_LOG_LEVEL \
