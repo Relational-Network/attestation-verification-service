@@ -31,7 +31,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
 thiserror = "2.0.16"
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "fs"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "fs", "signal"] }
 tokio-rustls = { version = "0.26.2", default-features = false, features = ["ring", "tls12"] }
 tower = { version = "0.5.2", features = ["util"] }
 tower-service = "0.3.3"

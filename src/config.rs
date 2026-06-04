@@ -11,7 +11,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 /// Default listen address for the AVS API.
-pub const DEFAULT_BIND_ADDR: &str = "0.0.0.0:9100";
+///
+/// Binds to loopback by default (defence in depth). When AVS runs alongside
+/// Caddy on the same VM the proxy reaches it at `localhost:9100`. Override
+/// with `AVS_BIND_ADDR` only when AVS must accept off-host traffic directly.
+pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:9100";
 /// JWT issuer string for browser verification.
 pub const DEFAULT_ISSUER: &str = "attestation-verification-service";
 /// Default token lifetime in seconds (5 minutes).
@@ -39,6 +43,15 @@ pub struct Config {
     pub allowed_enclave_hosts: Vec<String>,
     /// Clerk JWKS URL for token verification (optional, enables Clerk auth)
     pub clerk_jwks_url: Option<String>,
+    /// Expected Clerk issuer claim (`iss`). Required when `clerk_jwks_url` is set.
+    /// Read at runtime from the env var of the same name; kept on Config for
+    /// startup validation and visibility.
+    #[allow(dead_code)]
+    pub clerk_expected_iss: Option<String>,
+    /// Expected Clerk audience claim (`aud`). Optional — Clerk does not
+    /// populate `aud` by default; set this only when a JWT template adds it.
+    #[allow(dead_code)]
+    pub clerk_expected_aud: Option<String>,
 }
 
 impl Config {
@@ -72,6 +85,9 @@ impl Config {
     /// - `AVS_ALLOWED_ENCLAVE_HOSTS`: Comma-separated allowlist of enclave hosts
     /// - `AVS_SIGNING_KEY_ID`: Key ID for JWT header (default: `avs-signing-key-1`)
     /// - `CLERK_JWKS_URL`: Clerk JWKS URL for token verification (enables Clerk auth)
+    /// - `CLERK_EXPECTED_ISS`: Required Clerk issuer when `CLERK_JWKS_URL` is set
+    /// - `CLERK_EXPECTED_AUD`: Optional Clerk audience (only set when a Clerk
+    ///   JWT template populates `aud`)
     pub fn from_env() -> Result<Self, String> {
         let bind_addr = env::var("AVS_BIND_ADDR")
             .unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string())
@@ -113,8 +129,28 @@ impl Config {
         let expected_isv_svn =
             env::var("AVS_EXPECTED_ISV_SVN").unwrap_or_else(|_| "any".to_string());
 
-        if expected_mrsigner == "any" && expected_mrenclave == "any" {
-            return Err("AVS_EXPECTED_MRSIGNER or AVS_EXPECTED_MRENCLAVE must be set".to_string());
+        // Defence in depth: require BOTH measurements to be set explicitly.
+        // Allowing one to remain `"any"` would let an attacker pass attestation
+        // with a different binary signed by the trusted key (or vice versa).
+        if expected_mrenclave == "any" || expected_mrsigner == "any" {
+            return Err(
+                "both AVS_EXPECTED_MRENCLAVE and AVS_EXPECTED_MRSIGNER must be set to a hex measurement (not \"any\")"
+                    .to_string(),
+            );
+        }
+
+        // ISV product/SVN policy must also be pinned. The relational-sdk CI
+        // pipeline rejects any built enclave whose isv_prod_id or isv_svn
+        // drifts from 0 (see `relational-sdk/.github/workflows/ci.yml` →
+        // "Verify signed enclave settings"), so the only correct production
+        // value today is "0". Accepting `"any"` would silently let any future
+        // build with a different ISV-SVN pass policy without a deliberate bump.
+        if expected_isv_prod_id == "any" || expected_isv_svn == "any" {
+            return Err(
+                "both AVS_EXPECTED_ISV_PROD_ID and AVS_EXPECTED_ISV_SVN must be set to a numeric value (not \"any\"). \
+                 The CI pipeline pins both to 0; bump deliberately when rotating ISV-SVN."
+                    .to_string(),
+            );
         }
 
         let allow_debug_enclave = env::var("AVS_ALLOW_DEBUG_ENCLAVE")
@@ -152,6 +188,32 @@ impl Config {
         };
 
         let clerk_jwks_url = env::var("CLERK_JWKS_URL").ok().filter(|v| !v.is_empty());
+        let clerk_expected_iss = env::var("CLERK_EXPECTED_ISS")
+            .ok()
+            .filter(|v| !v.is_empty());
+        let clerk_expected_aud = env::var("CLERK_EXPECTED_AUD")
+            .ok()
+            .filter(|v| !v.is_empty());
+
+        // When Clerk auth is enabled the issuer must be pinned. Without an
+        // expected `iss`, any Clerk instance whose JWKS URL points at the
+        // configured tenant (or any token whose header `kid` happens to match)
+        // could authenticate. The issuer URL is shown in the Clerk dashboard
+        // under "API Keys → Frontend API URL".
+        if clerk_jwks_url.is_some() && clerk_expected_iss.is_none() {
+            return Err(
+                "CLERK_EXPECTED_ISS must be set when CLERK_JWKS_URL is configured (e.g. https://<your-instance>.clerk.accounts.dev)"
+                    .to_string(),
+            );
+        }
+        if clerk_jwks_url.is_some() && clerk_expected_aud.is_none() {
+            // Soft warning only — Clerk's default tokens do not include `aud`,
+            // so requiring it would break out-of-the-box deployments.
+            tracing::warn!(
+                "CLERK_EXPECTED_AUD not set — Clerk audience claim will not be validated. \
+                 Configure a Clerk JWT template with a custom aud claim and set CLERK_EXPECTED_AUD for stronger binding."
+            );
+        }
 
         Ok(Self {
             bind_addr,
@@ -172,6 +234,8 @@ impl Config {
             allow_sw_hardening_needed,
             allowed_enclave_hosts,
             clerk_jwks_url,
+            clerk_expected_iss,
+            clerk_expected_aud,
         })
     }
 

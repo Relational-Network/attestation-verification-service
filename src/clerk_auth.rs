@@ -17,8 +17,8 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use openssl::{bn::BigNum, hash::MessageDigest, pkey::PKey, rsa::Rsa, sign::Verifier};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
 use tracing::{debug, error, warn};
 
 use crate::error::AppError;
@@ -102,8 +102,12 @@ struct CachedJwks {
     fetched_at: Instant,
 }
 
-/// Global JWKS cache
-static JWKS_CACHE: RwLock<Option<CachedJwks>> = RwLock::new(None);
+/// Global JWKS cache.
+///
+/// Uses `tokio::sync::RwLock` rather than `std::sync::RwLock` so that a panic
+/// while holding the write guard (e.g. during JWK parsing) cannot poison the
+/// lock and brick all subsequent verification.
+static JWKS_CACHE: RwLock<Option<CachedJwks>> = RwLock::const_new(None);
 
 /// Create OpenSSL RSA public key from JWK components
 ///
@@ -209,9 +213,7 @@ pub async fn fetch_clerk_jwks(jwks_url: &str) -> Result<(), AppError> {
         ));
     }
 
-    let mut cache = JWKS_CACHE
-        .write()
-        .map_err(|_| AppError::Config("Failed to acquire JWKS cache write lock".to_string()))?;
+    let mut cache = JWKS_CACHE.write().await;
     *cache = Some(CachedJwks {
         keys,
         fetched_at: Instant::now(),
@@ -320,6 +322,18 @@ pub async fn verify_clerk_token(token: &str, jwks_url: &str) -> Result<ClerkClai
         return Err(AppError::Unauthorized("Token has expired".to_string()));
     }
 
+    // Pinned-issuer validation: reject tokens whose `iss` doesn't match the
+    // configured Clerk instance, even if the signature verifies (defends
+    // against accidentally trusting a JWKS URL that serves multiple tenants).
+    if let Ok(expected_iss) = std::env::var("CLERK_EXPECTED_ISS") {
+        if claims.iss != expected_iss {
+            return Err(AppError::Unauthorized(format!(
+                "Token issuer mismatch. Expected: {}, got: {}",
+                expected_iss, claims.iss
+            )));
+        }
+    }
+
     // Check if audience validation is configured (N5 fix)
     if let Ok(expected_aud) = std::env::var("CLERK_EXPECTED_AUD") {
         debug!("Validating Clerk token audience: {}", expected_aud);
@@ -353,9 +367,7 @@ pub async fn verify_clerk_token(token: &str, jwks_url: &str) -> Result<ClerkClai
 async fn get_rsa_key(kid: &str, jwks_url: &str) -> Result<PKey<openssl::pkey::Public>, AppError> {
     // Check cache first
     {
-        let cache = JWKS_CACHE
-            .read()
-            .map_err(|_| AppError::Config("Failed to acquire JWKS cache read lock".to_string()))?;
+        let cache = JWKS_CACHE.read().await;
 
         if let Some(cached) = &*cache {
             if cached.fetched_at.elapsed() < JWKS_CACHE_TTL {
@@ -371,9 +383,7 @@ async fn get_rsa_key(kid: &str, jwks_url: &str) -> Result<PKey<openssl::pkey::Pu
     fetch_clerk_jwks(jwks_url).await?;
 
     // Try again
-    let cache = JWKS_CACHE
-        .read()
-        .map_err(|_| AppError::Config("Failed to acquire JWKS cache read lock".to_string()))?;
+    let cache = JWKS_CACHE.read().await;
 
     if let Some(cached) = &*cache {
         if let Some(key) = cached.keys.get(kid) {

@@ -216,20 +216,37 @@ pub async fn attest(
     clerk_auth: ClerkAuth,
     Json(request): Json<AttestRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Defence-in-depth: cap enclave_url length before parsing to bound memory
+    // and to keep audit logs readable.
+    if request.enclave_url.len() > 2048 {
+        return Err(AppError::EnclaveResponse(
+            "enclave_url exceeds 2048 characters".to_string(),
+        ));
+    }
+
     // Extract user info from Clerk auth (if available)
     let (user_id, role) = match clerk_auth.0 {
         Some(user) => {
-            // User authenticated via Clerk - use their verified ID.
-            // If the Clerk JWT includes publicMetadata.role, use it;
-            // otherwise fall back to the role from the request body
-            // (trusted because the Clerk JWT was already verified and
-            // the request comes from an authenticated server-side context).
-            let role = if user.role == "user" {
-                // "user" is the default when publicMetadata has no role.
-                // Prefer explicitly-supplied request body role if present.
-                request.role.unwrap_or(user.role)
-            } else {
+            // Authenticated path: NEVER trust request.role / request.user_id.
+            // The role comes only from verified Clerk claims (publicMetadata.role).
+            // If the Clerk token has no role, fall back to least privilege.
+            // This blocks privilege escalation when /v1/attest is reachable from
+            // the public internet (it is, via Caddy).
+            if request.role.is_some() || request.user_id.is_some() {
+                warn!(
+                    user_id = %user.user_id,
+                    "Ignoring user_id/role in request body — deriving from verified Clerk claims only"
+                );
+            }
+            let role = if is_known_role(&user.role) {
                 user.role
+            } else {
+                warn!(
+                    user_id = %user.user_id,
+                    role = %user.role,
+                    "Unknown Clerk role — defaulting to read_only"
+                );
+                "read_only".to_string()
             };
             (user.user_id, role)
         }
@@ -243,9 +260,16 @@ pub async fn attest(
             }
             // Backward compatibility: allow anonymous if Clerk not configured
             warn!("Anonymous attestation request (CLERK_JWKS_URL not configured)");
+            let requested_role = request.role.unwrap_or_else(|| "user".to_string());
+            let role = if is_known_role(&requested_role) {
+                requested_role
+            } else {
+                warn!(role = %requested_role, "Unknown role in request — defaulting to read_only");
+                "read_only".to_string()
+            };
             (
                 request.user_id.unwrap_or_else(|| "anonymous".to_string()),
-                request.role.unwrap_or_else(|| "user".to_string()),
+                role,
             )
         }
     };
@@ -323,6 +347,12 @@ pub async fn attest(
         }),
     );
     Ok(response)
+}
+
+/// Validate role string against the known RBAC enum used by relational-sdk.
+/// Unknown roles must default to least privilege at the call site.
+fn is_known_role(role: &str) -> bool {
+    matches!(role, "admin" | "user" | "analyst" | "read_only")
 }
 
 /// Allowlist helper: match exact host or host:port.
